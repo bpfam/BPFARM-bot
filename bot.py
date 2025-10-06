@@ -7,10 +7,8 @@ def menu_principale():
         [InlineKeyboardButton("💬 Contatti", callback_data='contatti')],
         [InlineKeyboardButton("ℹ️ Info", callback_data='info')]
     ]
-    return InlineKeyboardMarkup(keyboard)
-    from telegram import Update
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
 # Inserisci qui il tuo token del bot
 TOKEN = TOKEN = "8425042215:AAGxVzPfD7Z3RUVvqSJi8BK4iHX2T..." 
 
