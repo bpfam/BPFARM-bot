@@ -12,7 +12,7 @@ def menu_principale():
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Inserisci qui il tuo token del bot
-TOKEN = "INSERISCI_IL_TUO_TOKEN_TELEGRAM"
+TOKEN = 8425042215:AAGxVzPfD7Z3RUVvqSJi8BK4iHX2TCf0I3E
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
