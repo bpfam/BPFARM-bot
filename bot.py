@@ -11,7 +11,7 @@ def menu_principale():
     return InlineKeyboardMarkup(keyboard)
 
 # Inserisci qui il tuo token del bot
-TOKEN =8425042215:AAGZWWumKfephqTo9u7R0uRSQ8iekOvKuME
+TOKEN ="8425042215:AAGZWWumKfephqTo9u7R0uRSQ8iekOvKuME..."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Ciao! Il bot è attivo e funzionante.")
