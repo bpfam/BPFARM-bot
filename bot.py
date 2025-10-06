@@ -1,21 +1,20 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 def menu_principale():
     keyboard = [
-        [InlineKeyboardButton("🌿 Weed", callback_data='weed')],
-        [InlineKeyboardButton("💨 Hash", callback_data='hash')],
-        [InlineKeyboardButton("💬 Contatti", callback_data='contatti')],
-        [InlineKeyboardButton("ℹ️ Info", callback_data='info')]
+        [InlineKeyboardButton("🌿 Weed", callback_data="weed")],
+        [InlineKeyboardButton("💨 Hash", callback_data="hash")],
+        [InlineKeyboardButton("💬 Contatti", callback_data="contatti")],
+        [InlineKeyboardButton("ℹ️ Info", callback_data="info")]
     ]
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+    return InlineKeyboardMarkup(keyboard)
+
 # Inserisci qui il tuo token del bot
-TOKEN = TOKEN = "8425042215:AAGxVzPfD7Z3RUVvqSJi8BK4iHX2T..." 
+TOKEN = "8425042215:AAGxVzPfD7Z3RUVvqSJi8BK4iHX2t..."  # <-- metti il tuo token completo
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Ciao! Il bot è attivo e funzionante.\nUsa /menu per vedere le opzioni."
-    )
+    await update.message.reply_text("👋 Ciao! Il bot è attivo e funzionante.")
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
