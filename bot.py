@@ -1,24 +1,22 @@
-# bot.py
-import logging
+import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-BOT_TOKEN = BOT_TOKEN = "8425042215:AAHW6HTThpsc4M65sixfCsr1t3TwYcHH7ws..."
+# Prende il token in modo sicuro dalla variabile d’ambiente su Render
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-
+# Funzione /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
+    # Messaggio di benvenuto
     message_text = (
         "💨 Yo! Benvenuto nel bot ufficiale **BPFam 🔥**\n"
         "📖 Menu, info e contatti qui sotto 👇\n"
         "💬 Scrivici su Telegram se hai bisogno!"
     )
 
+    # Pulsanti con link
     keyboard = [
         [
             InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk"),
@@ -32,6 +30,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Invia il messaggio con i pulsanti
     await context.bot.send_photo(
         chat_id=chat_id,
         photo="https://i.postimg.cc/LJNHDQXY/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664-B3.jpg",
@@ -40,9 +39,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# Avvio del bot
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        print("❌ ERRORE: Nessun token trovato. Aggiungi BOT_TOKEN come variabile d’ambiente su Render.")
+        return
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+
+    print("✅ Bot avviato con successo! In attesa di messaggi...")
     app.run_polling()
 
 if __name__ == "__main__":
