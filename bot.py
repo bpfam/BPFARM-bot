@@ -20,10 +20,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk"),
+            
             InlineKeyboardButton("🎇 RECENSIONI", url="https://t.me/+fIQWowFYHWZjZWU0")
         ],
         [
             InlineKeyboardButton("📲 Info-Contatti", url="https://t.me/+deEirerZvwRjNjA0"),
+            
             InlineKeyboardButton("🇪🇸 SHIIP-SPAGNA-menu", url="https://t.me/+oNfKAtrBMYA1MmRk")
         ]
     ]
