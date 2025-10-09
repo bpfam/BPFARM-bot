@@ -1,11 +1,11 @@
-import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Prende il token in modo sicuro dalla variabile d’ambiente su Render
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# 🔑 Inserisci qui il tuo token
+BOT_TOKEN = "INSERISCI_IL_TUO_TOKEN_QUI"
 
-# Funzione /start
+
+# 🔹 Funzione di avvio del bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
@@ -16,7 +16,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💬 Scrivici su Telegram se hai bisogno!"
     )
 
-    # Pulsanti con link
+    # Pulsanti con i link
     keyboard = [
         [
             InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk"),
@@ -30,7 +30,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Invia il messaggio con i pulsanti
+    # Invia il messaggio con la foto e i pulsanti
     await context.bot.send_photo(
         chat_id=chat_id,
         photo="https://i.postimg.cc/LJNHDQXY/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664-B3.jpg",
@@ -39,17 +39,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# Avvio del bot
-def main():
-    if not BOT_TOKEN:
-        print("❌ ERRORE: Nessun token trovato. Aggiungi BOT_TOKEN come variabile d’ambiente su Render.")
-        return
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# 🔹 Funzione principale per avviare il bot
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Imposta solo il comando /start
+    app.bot.set_my_commands([
+        ("start", "Avvia il bot e mostra il menu principale")
+    ])
+
+    # Aggiungi il comando /start
     app.add_handler(CommandHandler("start", start))
 
-    print("✅ Bot avviato con successo! In attesa di messaggi...")
+    print("🤖 Bot avviato! In attesa di messaggi...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
