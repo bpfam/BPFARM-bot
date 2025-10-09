@@ -1,10 +1,10 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-# se usi ApplicationBuilder: from telegram.ext import ApplicationBuilder
+import asyncio
 
 BOT_TOKEN = "INSERISCI_IL_TUO_TOKEN_QUI"
 
-# --- funzione /start (lascia come la hai) ---
+# --- comando /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     message_text = (
@@ -12,6 +12,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 Menu, info e contatti qui sotto 👇\n"
         "💬 Scrivici su Telegram se hai bisogno!"
     )
+
     keyboard = [
         [
             InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk"),
@@ -23,6 +24,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+
     await context.bot.send_photo(
         chat_id=chat_id,
         photo="https://i.postimg.cc/LJNHDQXY/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664-B3.jpg",
@@ -31,25 +33,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# --- funzione che pulisce i comandi all'avvio ---
+# --- funzione che cancella i comandi ---
 async def clear_commands_on_startup(app):
-    # cancella i comandi "globali" (di default)
     await app.bot.set_my_commands([])
-
-    # se vuoi vedere cosa c'era prima, puoi usare get_my_commands:
     current = await app.bot.get_my_commands()
-    print("Comandi impostati (dopo clear):", current)
+    print("✅ Comandi cancellati! Ora rimangono:", current)
 
 # --- main ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # registra handler
     app.add_handler(CommandHandler("start", start))
 
-    # avvia con post_init: chiama clear_commands_on_startup(app) subito dopo init
-    print("Avvio bot e pulizia comandi...")
-    app.run_polling(post_init=clear_commands_on_startup)
+    # invece di post_init usiamo asyncio prima di run_polling
+    async def startup():
+        await clear_commands_on_startup(app)
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        print("🚀 Bot avviato e comandi puliti.")
+        await asyncio.Event().wait()  # mantiene il bot attivo
+
+    asyncio.run(startup())
 
 if __name__ == "__main__":
     main()
