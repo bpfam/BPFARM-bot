@@ -2,7 +2,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # 🔑 Inserisci qui il tuo token
-BOT_TOKEN = "INSERISCI_IL_TUO_TOKEN_QUI"
+BOT_TOKEN = "8425042215:AAEUOKWrAPC8FrjHZDLGW4X_vNQXYvIvPVU"
 
 
 # 🔹 Funzione di avvio del bot
