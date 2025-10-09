@@ -1,22 +1,17 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+# se usi ApplicationBuilder: from telegram.ext import ApplicationBuilder
 
-# 🔑 Inserisci qui il tuo token
-BOT_TOKEN = "8425042215:AAEUOKWrAPC8FrjHZDLGW4X_vNQXYvIvPVU"
+BOT_TOKEN = "INSERISCI_IL_TUO_TOKEN_QUI"
 
-
-# 🔹 Funzione di avvio del bot
+# --- funzione /start (lascia come la hai) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-
-    # Messaggio di benvenuto
     message_text = (
         "💨 Yo! Benvenuto nel bot ufficiale **BPFam 🔥**\n"
         "📖 Menu, info e contatti qui sotto 👇\n"
         "💬 Scrivici su Telegram se hai bisogno!"
     )
-
-    # Pulsanti con i link
     keyboard = [
         [
             InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk"),
@@ -27,10 +22,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🇪🇸 Menù-shiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk")
         ]
     ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Invia il messaggio con la foto e i pulsanti
     await context.bot.send_photo(
         chat_id=chat_id,
         photo="https://i.postimg.cc/LJNHDQXY/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664-B3.jpg",
@@ -39,22 +31,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# --- funzione che pulisce i comandi all'avvio ---
+async def clear_commands_on_startup(app):
+    # cancella i comandi "globali" (di default)
+    await app.bot.set_my_commands([])
 
-# 🔹 Funzione principale per avviare il bot
+    # se vuoi vedere cosa c'era prima, puoi usare get_my_commands:
+    current = await app.bot.get_my_commands()
+    print("Comandi impostati (dopo clear):", current)
+
+# --- main ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Imposta solo il comando /start
-    app.bot.set_my_commands([
-        ("start", "Avvia il bot e mostra il menu principale")
-    ])
-
-    # Aggiungi il comando /start
+    # registra handler
     app.add_handler(CommandHandler("start", start))
 
-    print("🤖 Bot avviato! In attesa di messaggi...")
-    app.run_polling()
-
+    # avvia con post_init: chiama clear_commands_on_startup(app) subito dopo init
+    print("Avvio bot e pulizia comandi...")
+    app.run_polling(post_init=clear_commands_on_startup)
 
 if __name__ == "__main__":
     main()
