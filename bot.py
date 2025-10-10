@@ -14,13 +14,26 @@ def load_users():
 
 def save_users(users):
     with open(USERS_FILE, "w") as f:
-        json.dump(users, f)
+        json.dump(users, f, indent=4)
+
 # Prende il token in modo sicuro dalla variabile d’ambiente su Render
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # Funzione /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    # 🔹 Salva automaticamente l’utente
+    users = load_users()
+    if user.id not in [u["id"] for u in users]:
+        users.append({
+            "id": user.id,
+            "username": user.username,
+            "first_name": user.first_name
+        })
+        save_users(users)
+        print(f"✅ Nuovo utente salvato: {user.first_name} (@{user.username})")
 
     # Messaggio di benvenuto
     message_text = (
@@ -33,12 +46,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk"),
-            
             InlineKeyboardButton("🎇RECENSIONI", url="https://t.me/+fIQWowFYHWZjZWU0")
         ],
         [
             InlineKeyboardButton("📲Info-Contatti", url="https://t.me/+deEirerZvwRjNjA0"),
-            
             InlineKeyboardButton("🇪🇸SHIIP-SPAGNA-menu", url="https://t.me/+oNfKAtrBMYA1MmRk")
         ]
     ]
