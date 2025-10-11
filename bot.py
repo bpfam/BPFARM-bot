@@ -1,16 +1,20 @@
-# bot.py - Telegram Bot compatibile con python-telegram-bot v20+
+# bot.py – Telegram Bot compatibile con python-telegram-bot v20.7
 import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 
-# ========== CONFIG ==========
+# ========= CONFIG =========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "/data/users.db")
 
-# ========== DATABASE ==========
+# ========= DATABASE =========
 def init_db():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
@@ -32,7 +36,7 @@ def add_user(user):
     cur.execute("""
         INSERT OR IGNORE INTO users (id, username, first_name, created_at)
         VALUES (?, ?, ?, ?)
-    """, (user.id, user.username, user.first_name, datetime.utcnow().isoformat()))
+    """, (user.id, user.username, user.first_name, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
@@ -44,7 +48,7 @@ def count_users():
     conn.close()
     return n or 0
 
-# ========== HANDLERS ==========
+# ========= HANDLERS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user)
@@ -52,17 +56,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = (
         "💨 Yo! Benvenuto nel bot ufficiale!\n"
         "📖 Menu, info e contatti qui sotto 👇\n"
-        "💬 Scrivici su Telegram se hai bisogno di aiuto!"
+        "💬 Scrivici su Telegram se hai bisogno!"
     )
 
     keyboard = [
         [
-            InlineKeyboardButton("📖 Menu", url="https://example.com/menu"),
-            InlineKeyboardButton("💥 Recensioni", url="https://example.com/reviews")
+            InlineKeyboardButton("📖 Menu", url="https://t.me/tuolinkmenu"),
+            InlineKeyboardButton("💥 Recensioni", url="https://t.me/tuolinkrecensioni"),
         ],
         [
-            InlineKeyboardButton("📱 Info-bot", url="https://t.me/tuo_bot"),
-            InlineKeyboardButton("🚢 Ship", url="https://example.com/ship")
+            InlineKeyboardButton("📱 Info", url="https://t.me/tuolinkinfo"),
+            InlineKeyboardButton("🚢 Shop", url="https://t.me/tuolinkshop"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -77,19 +81,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = count_users()
-    await update.message.reply_text(f"👥 Utenti registrati: *{n}*", parse_mode=constants.ParseMode.MARKDOWN)
+    await update.message.reply_text(f"👥 Numero utenti registrati: {n}")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/start - Benvenuto\n"
-        "/utenti - Numero utenti\n"
-        "/help - Aiuto"
+        "/start – Benvenuto\n"
+        "/utenti – Numero utenti\n"
+        "/help – Aiuto"
     )
 
-# ========== MAIN ==========
+# ========= MAIN =========
 def main():
     if not BOT_TOKEN:
-        print("❌ ERRORE: Nessun token trovato!")
+        print("❌ ERRORE: Nessun token trovato nelle variabili d'ambiente.")
         return
 
     init_db()
