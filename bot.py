@@ -60,25 +60,27 @@ def count_users():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user)
 
-    message_text = (
-        "🏆Benvenuto nel bot ufficiale di BPFAM!\n"
-        "⚡️Serietà e rispetto sono la nostra identità."
-        )
+message_text = (
+    "🏆 Benvenuto nel bot ufficiale di BPFAM!\n"
+    "⚡ Serietà e rispetto sono la nostra identità.\n"
+    "💪 Qui si cresce con impegno e determinazione."
+)
 
-    keyboard = [
-        [
-            InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk"),
-            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0"),
-        ],
-        [
-            InlineKeyboardButton("📱 Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0"),
-            InlineKeyboardButton("🇪🇸Ship Spagna", url=https://t.me/+oNfKAtrBMYA1MmRk
-        ],
-        [
-            InlineKeyboardButton("🔗 Link", url="https://t.me/+@BPLAFAMILIA"),
-        ]
+keyboard = [
+    [
+        InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
+        InlineKeyboardButton("💥 Recensioni", url="https://t.me/+w3_ePB2hmVwxNmNk"),
+    ],
+    [
+        InlineKeyboardButton("📱 Contatti / Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
+        InlineKeyboardButton("🇪🇸 Schiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk"),
+    ],
+    [
+        InlineKeyboardButton("🔗 Link", url="https://t.me/tuocontattoqui"),
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+]  # ✅ chiusura corretta: una sola parentesi quadra, senza virgola
+
+reply_markup = InlineKeyboardMarkup(keyboard)
 
     if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
         await context.bot.send_photo(
