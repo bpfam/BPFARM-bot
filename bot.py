@@ -92,7 +92,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ],
         [
             InlineKeyboardButton("📱 Contatti / Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
-            InlineKeyboardButton("🇪🇸 Schiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk"),
+            InlineKeyboardButton("🇪🇸 Shiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk"),
         ],
         [
             InlineKeyboardButton("🔗 Link", url="https://t.me/tuocontattoqui"),
