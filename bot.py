@@ -13,7 +13,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    JobQueue,  # <-- usiamo JobQueue esplicitamente
+    JobQueue,
 )
 
 # ======== LOGGING ========
@@ -27,11 +27,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 
-# Owner per comandi di backup
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # imposta il tuo user id Telegram
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # tuo user ID Telegram
 TIMEZONE = os.environ.get("TZ", "Europe/Rome")
 
-# Immagine opzionale di benvenuto (usa un link diretto .jpg/.png)
 PHOTO_URL = os.environ.get(
     "PHOTO_URL",
     "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg",
@@ -89,8 +87,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     keyboard = [
         [
-            InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk"),
-            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0"),
+            InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
+            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+w3_ePB2hmVwxNmNk"),
         ],
         [
             InlineKeyboardButton("📱 Contatti / Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
@@ -135,8 +133,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — Benvenuto\n"
         "/utenti — Numero utenti\n"
         "/info — Contatti\n"
-        "/backup — Invia backup database (owner)\n"
+        "/backup — Backup database (owner)\n"
         "/export_users — Esporta utenti in CSV (owner)\n"
+        "/test_backup — Test backup immediato (owner)\n"
         "/help — Aiuto"
     )
 
@@ -169,6 +168,23 @@ async def export_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"Errore export: {e}")
 
+# ======== TEST BACKUP MANUALE ========
+async def test_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if OWNER_ID and user_id != OWNER_ID:
+        return await update.effective_message.reply_text("Solo l'owner può usare questo comando.")
+    await update.effective_message.reply_text("⏳ Avvio test backup...")
+    try:
+        zip_path = make_db_backup()
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=open(zip_path, "rb"),
+            filename=os.path.basename(zip_path),
+            caption="✅ Test backup completato con successo!"
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Errore durante il test: {e}")
+
 # ======== MAIN ========
 def main() -> None:
     if not BOT_TOKEN:
@@ -177,7 +193,6 @@ def main() -> None:
 
     init_db()
 
-    # Costruiamo l'app
     builder = ApplicationBuilder().token(BOT_TOKEN)
     app = builder.build()
 
@@ -185,8 +200,8 @@ def main() -> None:
     if not getattr(app, "job_queue", None):
         jq = JobQueue()
         jq.set_application(app)
-        jq.initialize()        # prepara la coda
-        app.job_queue = jq     # assegna all'app
+        jq.initialize()
+        app.job_queue = jq
 
     # Comandi pubblici
     app.add_handler(CommandHandler("start", start))
@@ -197,8 +212,9 @@ def main() -> None:
     # Comandi owner
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("export_users", export_users_cmd))
+    app.add_handler(CommandHandler("test_backup", test_backup_cmd))
 
-    # ---- Backup automatico giornaliero alle 03:00 Europe/Rome ----
+    # ---- Backup automatico giornaliero alle 03:00 ----
     async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
         try:
             zip_path = make_db_backup()
@@ -218,10 +234,8 @@ def main() -> None:
         time=datetime.time(hour=3, minute=0, tzinfo=ZoneInfo(TIMEZONE)),
         name="daily_db_backup"
     )
-    # ---------------------------------------------------------------
 
     logger.info("✅ Bot avviato con successo!")
-    # run_polling avvierà anche la JobQueue se non già avviata
     app.run_polling()
 
 if __name__ == "__main__":
