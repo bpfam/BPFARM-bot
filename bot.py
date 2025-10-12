@@ -75,7 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_photo(
         chat_id=update.effective_chat.id,
-        photo="https://i.postimg.cc/cJjXsWfT/photo.jpg",
+        photo="https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4FC2-B4F6-D1058440-B1.jpg",
         caption=message_text,
         parse_mode=constants.ParseMode.MARKDOWN,
         reply_markup=reply_markup
