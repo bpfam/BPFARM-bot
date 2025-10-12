@@ -63,8 +63,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = (
         "🏆Benvenuto nel bot ufficiale di BPFAM!\n"
         "⚡️Serietà e rispetto sono la nostra identità.\n"
-        
-    )
+        )
 
     keyboard = [
         [
