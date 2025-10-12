@@ -49,6 +49,7 @@ def count_users():
     return n or 0
 
 # ========= HANDLERS =========
+# ======== HANDLERS ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(update.effective_user)
@@ -56,23 +57,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = (
         "💨 Yo! Benvenuto nel bot ufficiale!\n"
         "📖 Menu, info e contatti qui sotto 👇\n"
-        "💬 Scrivici su Telegram se hai bisogno!"
+        "💬 Scrivici su Telegram se hai domande!"
     )
 
-    [
-            InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk"),
-            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0"),
+    keyboard = [
+        [
+            InlineKeyboardButton("📖 Menu", callback_data="menu"),
+            InlineKeyboardButton("💥 Recensioni", callback_data="recensioni"),
         ],
         [
-            InlineKeyboardButton("📱Contatti/Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
-            InlineKeyboardButton("Shiip Spagna'", url="https://t.me/+oNfKAtrBMYA1MmRk"),
+            InlineKeyboardButton("📱 Contatti", callback_data="contatti"),
+            InlineKeyboardButton("Ship shop 💎", callback_data="shop"),
         ]
     ]
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await context.bot.send_photo(
         chat_id=update.effective_chat.id,
-        photo="https://i.postimg.cc/cJjXT233/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664-B3.jpg",
+        photo="https://i.postimg.cc/cJjXsWfT/photo.jpg",
         caption=message_text,
         parse_mode=constants.ParseMode.MARKDOWN,
         reply_markup=reply_markup
