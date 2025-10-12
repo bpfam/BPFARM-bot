@@ -2,7 +2,7 @@
 import os
 import sqlite3
 import datetime  # per orario job
-from datetime import datetime
+from datetime import datetime as dt  # per timestamp utenti
 from pathlib import Path
 import logging
 from zoneinfo import ZoneInfo
@@ -13,6 +13,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
+    JobQueue,  # <-- usiamo JobQueue esplicitamente
 )
 
 # ======== LOGGING ========
@@ -27,7 +28,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 
 # Owner per comandi di backup
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # <-- metti il tuo user id Telegram
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # imposta il tuo user id Telegram
 TIMEZONE = os.environ.get("TZ", "Europe/Rome")
 
 # Immagine opzionale di benvenuto (usa un link diretto .jpg/.png)
@@ -65,7 +66,7 @@ def add_user(user) -> None:
         INSERT OR IGNORE INTO users (id, username, first_name, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        (user.id, user.username, user.first_name, datetime.utcnow().isoformat()),
+        (user.id, user.username, user.first_name, dt.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -78,7 +79,7 @@ def count_users() -> int:
     conn.close()
     return n or 0
 
-# ======== HANDLERS ========
+# ======== HANDLERS PUBBLICI ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user(update.effective_user)
     message_text = (
@@ -100,6 +101,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+
     if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
@@ -138,7 +140,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/help — Aiuto"
     )
 
-# ======== BACKUP HANDLERS ========
+# ======== HANDLERS BACKUP (solo owner) ========
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
     if OWNER_ID and user_id != OWNER_ID:
@@ -174,7 +176,17 @@ def main() -> None:
         return
 
     init_db()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Costruiamo l'app
+    builder = ApplicationBuilder().token(BOT_TOKEN)
+    app = builder.build()
+
+    # ✅ FIX job_queue: creazione manuale se mancante
+    if not getattr(app, "job_queue", None):
+        jq = JobQueue()
+        jq.set_application(app)
+        jq.initialize()        # prepara la coda
+        app.job_queue = jq     # assegna all'app
 
     # Comandi pubblici
     app.add_handler(CommandHandler("start", start))
@@ -201,8 +213,7 @@ def main() -> None:
             if OWNER_ID:
                 await context.bot.send_message(chat_id=OWNER_ID, text=f"Errore backup automatico: {e}")
 
-    job_queue = app.job_queue
-    job_queue.run_daily(
+    app.job_queue.run_daily(
         scheduled_backup,
         time=datetime.time(hour=3, minute=0, tzinfo=ZoneInfo(TIMEZONE)),
         name="daily_db_backup"
@@ -210,6 +221,7 @@ def main() -> None:
     # ---------------------------------------------------------------
 
     logger.info("✅ Bot avviato con successo!")
+    # run_polling avvierà anche la JobQueue se non già avviata
     app.run_polling()
 
 if __name__ == "__main__":
