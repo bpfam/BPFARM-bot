@@ -49,7 +49,7 @@ def count_users():
     return n or 0
 
 # ========= HANDLERS =========
-# ======== HANDLERS ========
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(update.effective_user)
