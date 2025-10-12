@@ -76,7 +76,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🇪🇸Ship Spagna", url="https://t.me/+dBuWJRY9sH0xMGE0"),
         ],
         [
-            InlineKeyboardButton("🔗 Link", url="https://t.me/+oNfKAtrBMYA1MmRk"),
+            InlineKeyboardButton("🔗 Link", url="https://t.me/+@BPLAFAMILIA"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
