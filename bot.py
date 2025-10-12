@@ -62,12 +62,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("📖 Menu", callback_data="menu"),
-            InlineKeyboardButton("💥 Recensioni", callback_data="recensioni"),
+            InlineKeyboardButton("📖 Menu", https://t.me/+w3_ePB2hmVwxNmNk
+            InlineKeyboardButton("💥 Recensioni", https://t.me/+fIQWowFYHWZjZWU0
         ],
         [
-            InlineKeyboardButton("📱 Contatti", callback_data="contatti"),
-            InlineKeyboardButton("Ship shop 💎", callback_data="shop"),
+            InlineKeyboardButton("📱 Contatti", https://t.me/+dBuWJRY9sH0xMGE0
+            InlineKeyboardButton("Shiip Spagna🇪🇸", https://t.me/+oNfKAtrBMYA1MmRk
         ]
     ]
 
