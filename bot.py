@@ -51,7 +51,7 @@ def count_users():
 # ========= HANDLERS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    add_user(user)
+    add_user(update.effective_user)
 
     message_text = (
         "💨 Yo! Benvenuto nel bot ufficiale!\n"
