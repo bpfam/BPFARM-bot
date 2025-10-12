@@ -61,12 +61,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("📖 Menu", url="https:https://t.me/https://t.me/+w3_ePB2hmVwxNmNk
-            InlineKeyboardButton("💥 Recensioni", url="https://t.me/https://t.me/+fIQWowFYHWZjZWU0
+            InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk)
+            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0)
         ],
         [
-            InlineKeyboardButton("📱Contatti/Info", url="https://t.me/https://t.me/+dBuWJRY9sH0xMGE0
-            InlineKeyboardButton("Shiip Spagna", url="https://t.me/https://t.me/+oNfKAtrBMYA1MmRk
+            InlineKeyboardButton("📱Contatti/Info", url="https://t.me/+dBuWJRY9sH0xMGE0)
+            InlineKeyboardButton("Shiip Spagna'", url="https://t.me/+oNfKAtrBMYA1MmRk)
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
