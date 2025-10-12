@@ -61,9 +61,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user)
 
     message_text = (
-        "💨 Yo! Benvenuto nel bot ufficiale!\n"
-        "📖 Menu, info e contatti qui sotto\n"
-        "💬 Scrivici su Telegram"
+        "🏆Benvenuto nel bot ufficiale di BPFAM!\n"
+        "⚡️Serietà e rispetto sono la nostra identità.\n"
+        
     )
 
     keyboard = [
@@ -73,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("📱 Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0"),
-            InlineKeyboardButton("🇪🇸Ship Spagna", url="https://t.me/+dBuWJRY9sH0xMGE0"),
+            InlineKeyboardButton("🇪🇸Ship Spagna", url=https://t.me/+oNfKAtrBMYA1MmRk
         ],
         [
             InlineKeyboardButton("🔗 Link", url="https://t.me/+@BPLAFAMILIA"),
