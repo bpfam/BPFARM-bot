@@ -3,39 +3,53 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+import logging
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
 )
+
+# ======== LOGGING ========
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 # ======== CONFIG ========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 
-# Sostituisci con il tuo link diretto da postimg (deve iniziare con https://i.postimg.cc/ e finire con .jpg/.png)
-PHOTO_URL = "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg"
+# Immagine opzionale di benvenuto (usa un link diretto .jpg/.png)
+PHOTO_URL = os.environ.get(
+    "PHOTO_URL",
+    "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg",
+)
 
 # ======== DATABASE ========
-def init_db():
+def init_db() -> None:
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
             created_at TEXT
         )
-    """)
+        """
+    )
     conn.commit()
     conn.close()
 
-def add_user(user):
+
+def add_user(user) -> None:
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute(
@@ -43,12 +57,13 @@ def add_user(user):
         INSERT OR IGNORE INTO users (id, username, first_name, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        (user.id, user.username, user.first_name, datetime.utcnow().isoformat())
+        (user.id, user.username, user.first_name, datetime.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
 
-def count_users():
+
+def count_users() -> int:
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM users")
@@ -56,16 +71,20 @@ def count_users():
     conn.close()
     return n or 0
 
+
 # ======== HANDLERS ========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # salva utente
     add_user(update.effective_user)
 
+    # testo benvenuto
     message_text = (
-        "🏆 Benvenuto nel bot ufficiale di BPFAM!\n"
+        "🏆 *Benvenuto nel bot ufficiale di BPFAM!*\n\n"
         "⚡ Serietà e rispetto sono la nostra identità.\n"
         "💪 Qui si cresce con impegno e determinazione."
     )
 
+    # tastiera con link
     keyboard = [
         [
             InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
@@ -77,50 +96,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🔗 Link", url="https://t.me/tuocontattoqui"),
-        ]
+        ],
     ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
-    await context.bot.send_photo(
-        chat_id=update.effective_chat.id,
-        photo=PHOTO_URL,
-        caption=message_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=reply_markup
-    )
-else:
-    await update.message.reply_text(
-        text=message_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=reply_markup
-    )
-        await update.message.reply_text(message_text, reply_markup=reply_markup)
+    # invio foto + caption se il link è valido, altrimenti solo testo
+    if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=PHOTO_URL,
+            caption=message_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup,
+        )
+    else:
+        await update.message.reply_text(
+            text=message_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup,
+        )
 
-async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "📇 Contatti\n"
+        "📇 *Contatti*\n"
         "• Telegram: @tuo_username\n"
         "• Email: info@example.com\n"
-        "• Orari: 9–18"
+        "• Orari: 9–18",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
-async def info_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text(
-        "📇 Contatti\n"
-        "• Telegram: @tuo_username\n"
-        "• Email: info@example.com\n"
-        "• Orari: 9–18"
-    )
 
-async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     n = count_users()
     await update.message.reply_text(f"👥 Utenti registrati: {n}")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "/start — Benvenuto\n"
         "/utenti — Numero utenti\n"
@@ -128,23 +140,24 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — Aiuto"
     )
 
+
 # ======== MAIN ========
-def main():
+def main() -> None:
     if not BOT_TOKEN:
-        print("❌ ERRORE: Nessun token BOT_TOKEN nelle variabili d'ambiente")
+        logger.error("❌ ERRORE: Variabile d'ambiente BOT_TOKEN mancante")
         return
 
     init_db()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("info", info_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(info_cb, pattern="^info$"))
 
-    print("✅ Bot avviato con successo!")
+    logger.info("✅ Bot avviato con successo!")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
