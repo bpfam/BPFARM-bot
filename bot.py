@@ -96,7 +96,7 @@ else:
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup
     )
-    else:
+else:
         await update.message.reply_text(message_text, reply_markup=reply_markup)
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
