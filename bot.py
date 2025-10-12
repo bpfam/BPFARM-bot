@@ -58,9 +58,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 Menu, info e contatti qui sotto 👇\n"
         "💬 Scrivici su Telegram se hai bisogno!"
     )
-async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    n = count_users()
-    await update.message.reply_text(f"👥 Utenti registrati: {n}")
+
         [
             InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk"),
             InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0"),
@@ -79,10 +77,11 @@ async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=constants.ParseMode.MARKDOWN,
         reply_markup=reply_markup
     )
-
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = count_users()
-    await update.message.reply_text(f"👥 Numero utenti registrati: {n}")
+    await update.message.reply_text(f"👥 Utenti registrati: {n}")
+
+
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
