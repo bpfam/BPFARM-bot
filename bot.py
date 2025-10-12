@@ -60,33 +60,43 @@ def count_users():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user)
 
-message_text = (
-    "🏆 Benvenuto nel bot ufficiale di BPFAM!\n"
-    "⚡ Serietà e rispetto sono la nostra identità.\n"
-    "💪 Qui si cresce con impegno e determinazione."
-)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_user(update.effective_user)
 
-keyboard = [
-    [
-        InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
-        InlineKeyboardButton("💥 Recensioni", url="https://t.me/+w3_ePB2hmVwxNmNk"),
-    ],
-    [
-        InlineKeyboardButton("📱 Contatti / Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
-        InlineKeyboardButton("🇪🇸 Schiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk"),
-    ],
-    [
-        InlineKeyboardButton("🔗 Link", url="https://t.me/tuocontattoqui"),
+    message_text = (
+        "🏆 Benvenuto nel bot ufficiale di BPFAM!\n"
+        "⚡ Serietà e rispetto sono la nostra identità.\n"
+        "💪 Qui si cresce con impegno e determinazione."
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
+            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+w3_ePB2hmVwxNmNk"),
+        ],
+        [
+            InlineKeyboardButton("📱 Contatti / Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
+            InlineKeyboardButton("🇪🇸 Schiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Link", url="https://t.me/tuocontattoqui"),
+        ]
     ]
-]  # ✅ chiusura corretta: una sola parentesi quadra, senza virgola
 
-reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
             photo=PHOTO_URL,
             caption=message_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup,
+        )
+    else:
+        await update.message.reply_text(
+            text=message_text,
+            parse_mode=ParseMode.MARKDOWN,
             reply_markup=reply_markup,
         )
     else:
