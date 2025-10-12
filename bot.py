@@ -60,9 +60,6 @@ def count_users():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    add_user(update.effective_user)
-
     message_text = (
         "🏆 Benvenuto nel bot ufficiale di BPFAM!\n"
         "⚡ Serietà e rispetto sono la nostra identità.\n"
