@@ -82,20 +82,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=PHOTO_URL,
-            caption=message_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup,
-        )
-    else:
-        await update.message.reply_text(
-            text=message_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup,
-        )
+if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=PHOTO_URL,
+        caption=message_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup
+    )
+else:
+    await update.message.reply_text(
+        text=message_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup
+    )
     else:
         await update.message.reply_text(message_text, reply_markup=reply_markup)
 
