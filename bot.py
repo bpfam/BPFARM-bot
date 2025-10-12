@@ -61,7 +61,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = count_users()
     await update.message.reply_text(f"👥 Utenti registrati: {n}")
-    keyboard = [
         [
             InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk"),
             InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0"),
