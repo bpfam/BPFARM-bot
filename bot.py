@@ -1,20 +1,25 @@
-# bot.py – Telegram Bot compatibile con python-telegram-bot v20.7
+# bot.py – Telegram Bot (python-telegram-bot v21+)
 import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
-# ========= CONFIG =========
+# ======== CONFIG ========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DB_FILE = os.environ.get("DB_FILE", "/data/users.db")
+DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 
-# ========= DATABASE =========
+# Sostituisci con il tuo link diretto da postimg (deve iniziare con https://i.postimg.cc/ e finire con .jpg/.png)
+PHOTO_URL = "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg"
+
+# ======== DATABASE ========
 def init_db():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
@@ -33,10 +38,13 @@ def init_db():
 def add_user(user):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         INSERT OR IGNORE INTO users (id, username, first_name, created_at)
         VALUES (?, ?, ?, ?)
-    """, (user.id, user.username, user.first_name, datetime.now().isoformat()))
+        """,
+        (user.id, user.username, user.first_name, datetime.utcnow().isoformat())
+    )
     conn.commit()
     conn.close()
 
@@ -48,55 +56,75 @@ def count_users():
     conn.close()
     return n or 0
 
-# ========= HANDLERS =========
-
+# ======== HANDLERS ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     add_user(update.effective_user)
 
     message_text = (
         "💨 Yo! Benvenuto nel bot ufficiale!\n"
-        "📖 Menu, info e contatti qui sotto 👇\n"
-        "💬 Scrivici su Telegram se hai domande!"
+        "📖 Menu, info e contatti qui sotto\n"
+        "💬 Scrivici su Telegram"
     )
 
     keyboard = [
         [
-            InlineKeyboardButton("📖 Menu", https://t.me/+w3_ePB2hmVwxNmNk
-            InlineKeyboardButton("💥 Recensioni", https://t.me/+fIQWowFYHWZjZWU0
+            InlineKeyboardButton("📖 Menu", url="https://t.me/+w3_ePB2hmVwxNmNk"),
+            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0"),
         ],
         [
-            InlineKeyboardButton("📱 Contatti", https://t.me/+dBuWJRY9sH0xMGE0
-            InlineKeyboardButton("Shiip Spagna🇪🇸", https://t.me/+oNfKAtrBMYA1MmRk
-        ]
+            InlineKeyboardButton("📱 Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0"),
+            InlineKeyboardButton("🇪🇸Ship Spagna", url="https://t.me/+dBuWJRY9sH0xMGE0"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Link", url="https://t.me/+oNfKAtrBMYA1MmRk"),
+        ],
     ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_photo(
-        chat_id=update.effective_chat.id,
-        photo="https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4FC2-B4F6-D1058440-B1.jpg",
-        caption=message_text,
-        parse_mode=constants.ParseMode.MARKDOWN,
-        reply_markup=reply_markup
+    if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=PHOTO_URL,
+            caption=message_text,
+            reply_markup=reply_markup,
+        )
+    else:
+        await update.message.reply_text(message_text, reply_markup=reply_markup)
+
+async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📇 Contatti\n"
+        "• Telegram: @tuo_username\n"
+        "• Email: info@example.com\n"
+        "• Orari: 9–18"
     )
+
+async def info_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "📇 Contatti\n"
+        "• Telegram: @tuo_username\n"
+        "• Email: info@example.com\n"
+        "• Orari: 9–18"
+    )
+
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = count_users()
     await update.message.reply_text(f"👥 Utenti registrati: {n}")
 
-
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/start – Benvenuto\n"
-        "/utenti – Numero utenti\n"
-        "/help – Aiuto"
+        "/start — Benvenuto\n"
+        "/utenti — Numero utenti\n"
+        "/info — Contatti\n"
+        "/help — Aiuto"
     )
 
-# ========= MAIN =========
+# ======== MAIN ========
 def main():
     if not BOT_TOKEN:
-        print("❌ ERRORE: Nessun token trovato nelle variabili d'ambiente.")
+        print("❌ ERRORE: Nessun token BOT_TOKEN nelle variabili d'ambiente")
         return
 
     init_db()
@@ -104,12 +132,12 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("utenti", utenti))
+    app.add_handler(CommandHandler("info", info_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CallbackQueryHandler(info_cb, pattern="^info$"))
 
-    print("✅ Bot avviato con successo! In ascolto (polling)...")
+    print("✅ Bot avviato con successo!")
     app.run_polling()
 
 if __name__ == "__main__":
-    init_db()
     main()
-    
