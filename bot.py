@@ -1,9 +1,11 @@
 # bot.py – Telegram Bot (python-telegram-bot v21+)
 import os
 import sqlite3
+import datetime  # per orario job
 from datetime import datetime
 from pathlib import Path
 import logging
+from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -24,11 +26,18 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 
+# Owner per comandi di backup
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # <-- metti il tuo user id Telegram
+TIMEZONE = os.environ.get("TZ", "Europe/Rome")
+
 # Immagine opzionale di benvenuto (usa un link diretto .jpg/.png)
 PHOTO_URL = os.environ.get(
     "PHOTO_URL",
     "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg",
 )
+
+# ======== BACKUP UTILS ========
+from backup_utils import make_db_backup, export_users_csv
 
 # ======== DATABASE ========
 def init_db() -> None:
@@ -48,7 +57,6 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-
 def add_user(user) -> None:
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -62,7 +70,6 @@ def add_user(user) -> None:
     conn.commit()
     conn.close()
 
-
 def count_users() -> int:
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -71,20 +78,14 @@ def count_users() -> int:
     conn.close()
     return n or 0
 
-
 # ======== HANDLERS ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # salva utente
     add_user(update.effective_user)
-
-    # testo benvenuto
     message_text = (
         "🏆 *Benvenuto nel bot ufficiale di BPFAM!*\n\n"
         "⚡ Serietà e rispetto sono la nostra identità.\n"
         "💪 Qui si cresce con impegno e determinazione."
     )
-
-    # tastiera con link
     keyboard = [
         [
             InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
@@ -99,8 +100,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # invio foto + caption se il link è valido, altrimenti solo testo
     if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
@@ -116,7 +115,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=reply_markup,
         )
 
-
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📇 *Contatti*\n"
@@ -126,20 +124,48 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
 
-
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     n = count_users()
     await update.message.reply_text(f"👥 Utenti registrati: {n}")
-
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "/start — Benvenuto\n"
         "/utenti — Numero utenti\n"
         "/info — Contatti\n"
+        "/backup — Invia backup database (owner)\n"
+        "/export_users — Esporta utenti in CSV (owner)\n"
         "/help — Aiuto"
     )
 
+# ======== BACKUP HANDLERS ========
+async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if OWNER_ID and user_id != OWNER_ID:
+        return await update.effective_message.reply_text("Solo l'owner può usare questo comando.")
+    try:
+        zip_path = make_db_backup()
+        await update.effective_message.reply_document(
+            document=open(zip_path, "rb"),
+            filename=os.path.basename(zip_path),
+            caption="Backup database eseguito ✅"
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(f"Errore backup: {e}")
+
+async def export_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if OWNER_ID and user_id != OWNER_ID:
+        return await update.effective_message.reply_text("Solo l'owner può usare questo comando.")
+    try:
+        csv_path = export_users_csv()
+        await update.effective_message.reply_document(
+            document=open(csv_path, "rb"),
+            filename=os.path.basename(csv_path),
+            caption="Export utenti (CSV) ✅"
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(f"Errore export: {e}")
 
 # ======== MAIN ========
 def main() -> None:
@@ -150,14 +176,41 @@ def main() -> None:
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Comandi pubblici
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("info", info_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
 
+    # Comandi owner
+    app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("export_users", export_users_cmd))
+
+    # ---- Backup automatico giornaliero alle 03:00 Europe/Rome ----
+    async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            zip_path = make_db_backup()
+            if OWNER_ID:
+                await context.bot.send_document(
+                    chat_id=OWNER_ID,
+                    document=open(zip_path, "rb"),
+                    filename=os.path.basename(zip_path),
+                    caption="Backup automatico notturno ✅"
+                )
+        except Exception as e:
+            if OWNER_ID:
+                await context.bot.send_message(chat_id=OWNER_ID, text=f"Errore backup automatico: {e}")
+
+    job_queue = app.job_queue
+    job_queue.run_daily(
+        scheduled_backup,
+        time=datetime.time(hour=3, minute=0, tzinfo=ZoneInfo(TIMEZONE)),
+        name="daily_db_backup"
+    )
+    # ---------------------------------------------------------------
+
     logger.info("✅ Bot avviato con successo!")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
