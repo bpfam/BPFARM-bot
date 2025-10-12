@@ -65,8 +65,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("💥 Recensioni", url="https://t.me/tuolinkrecensioni"),
         ],
         [
-            InlineKeyboardButton("📱 Info", url="https://t.me/tuolinkinfo"),
-            InlineKeyboardButton("🚢 Shop", url="https://t.me/tuolinkshop"),
+            InlineKeyboardButton("📱Contatti/Info", url="https://t.me/tuolinkinfo"),
+            InlineKeyboardButton("Shiip Spagna", url="https://t.me/tuolinkshop"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
