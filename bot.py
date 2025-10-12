@@ -76,7 +76,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🔗 Link", url="https://t.me/+@BPLAFAMILIA"),
-        ],
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
