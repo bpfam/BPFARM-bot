@@ -1,6 +1,6 @@
 # =====================================================
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
-# Protezione anti-conflict + backup automatico + salvataggio utenti
+# Protezione anti-conflict + backup automatico + salvataggio utenti + /status
 # =====================================================
 
 import os
@@ -9,12 +9,14 @@ import logging
 import shutil
 import asyncio as aio
 import time as pytime
-from datetime import datetime, timezone, time as dtime
+from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import telegram.error as tgerr
+
+VERSION = "1.4"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -84,6 +86,22 @@ def _parse_backup_time(hhmm: str) -> dtime:
     except Exception:
         return dtime(hour=3, minute=0)
 
+def _next_backup_utc() -> datetime:
+    """Calcola la prossima esecuzione backup (UTC) in base a BACKUP_TIME."""
+    run_t = _parse_backup_time(BACKUP_TIME)
+    now = datetime.now(timezone.utc)
+    candidate = datetime.combine(date.today(), run_t, tzinfo=timezone.utc)
+    if candidate <= now:
+        candidate = candidate + timedelta(days=1)
+    return candidate
+
+def _last_backup_file() -> Path | None:
+    p = Path(BACKUP_DIR)
+    if not p.exists():
+        return None
+    files = sorted(p.glob("*.db"), reverse=True)
+    return files[0] if files else None
+
 # ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -118,7 +136,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/utenti – Numero utenti registrati\n"
         "/backup – Backup manuale (solo admin)\n"
         "/ultimo_backup – Invia l’ultimo file di backup\n"
-        "/test_backup – Esegue ora il job di backup (solo admin)"
+        "/test_backup – Esegue ora il job di backup (solo admin)\n"
+        "/status – Stato del bot (versione/ora/prossimo backup/utenti)"
     )
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,6 +145,21 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👥 Utenti registrati: {count_users()}")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now_utc = datetime.now(timezone.utc)
+    next_bu = _next_backup_utc()
+    last = _last_backup_file()
+    last_line = f"📦 Ultimo backup: {last.name}" if last else "📦 Ultimo backup: nessuno"
+    await update.message.reply_text(
+        "🔎 **Stato bot**\n"
+        f"• Versione: {VERSION}\n"
+        f"• Ora server (UTC): {now_utc:%Y-%m-%d %H:%M:%S}\n"
+        f"• Prossimo backup (UTC): {next_bu:%Y-%m-%d %H:%M}\n"
+        f"• Utenti registrati: {count_users()}\n"
+        f"{last_line}",
+        disable_web_page_preview=True,
+    )
 
 # ===== BACKUP =====
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
@@ -162,10 +196,11 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not os.path.exists(BACKUP_DIR):
+    p = Path(BACKUP_DIR)
+    if not p.exists():
         await update.message.reply_text("Nessun backup trovato.")
         return
-    files = sorted(Path(BACKUP_DIR).glob("*.db"), reverse=True)
+    files = sorted(p.glob("*.db"), reverse=True)
     if not files:
         await update.message.reply_text("Nessun backup disponibile.")
         return
@@ -219,6 +254,7 @@ def main():
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
     app.add_handler(CommandHandler("test_backup", test_backup))
+    app.add_handler(CommandHandler("status", status_command))
 
     # Schedula backup giornaliero (orario del server, UTC)
     hhmm = _parse_backup_time(BACKUP_TIME)
