@@ -113,24 +113,44 @@ def _parse_backup_time(time_str: str) -> dtime:
         return dtime(hour=3, minute=0)
 
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Esegue il backup automatico del database."""
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = os.path.join(BACKUP_DIR, f"backup_{ts}.db")
-    shutil.copy2(DB_FILE, backup_path)
-    logger.info(f"💾 Backup creato: {backup_path}")
+    """Esegue il backup automatico del database e notifica l'admin."""
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(BACKUP_DIR, f"backup_{ts}.db")
+        shutil.copy2(DB_FILE, backup_path)
+        logger.info(f"💾 Backup creato: {backup_path}")
+
+        # Notifica admin (se configurato)
+        if ADMIN_ID:
+            utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"✅ Backup giornaliero completato.\n🕒 {utc_now}\n📦 File: {Path(backup_path).name}",
+            )
+    except Exception as e:
+        logger.exception("Errore nel backup automatico")
+        if ADMIN_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"❌ Errore nel backup giornaliero: {e}",
+            )
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Esegue backup manuale e invia il file all’admin."""
     if ADMIN_ID and update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
         return
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = os.path.join(BACKUP_DIR, f"manual_backup_{ts}.db")
-    shutil.copy2(DB_FILE, backup_path)
-    await update.message.reply_document(InputFile(backup_path), caption="💾 Backup manuale completato.")
-    logger.info(f"💾 Backup manuale eseguito: {backup_path}")
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(BACKUP_DIR, f"manual_backup_{ts}.db")
+        shutil.copy2(DB_FILE, backup_path)
+        await update.message.reply_document(InputFile(backup_path), caption="💾 Backup manuale completato.")
+        logger.info(f"💾 Backup manuale eseguito: {backup_path}")
+    except Exception as e:
+        logger.exception("Errore nel backup manuale")
+        await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra l’ultimo file di backup."""
@@ -163,7 +183,7 @@ def main():
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
 
-    # Pianifica backup giornaliero (usa l'orario del server: UTC su Render)
+    # Pianifica backup giornaliero (ora server = UTC su Render)
     hhmm = _parse_backup_time(BACKUP_TIME)
     app.job_queue.run_daily(
         backup_job,
