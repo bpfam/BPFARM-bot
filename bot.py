@@ -1,17 +1,16 @@
-# bot.py — BPFARM bot completo (python-telegram-bot v21+)
+# bot.py — BPFARM bot completo (python-telegram-bot v21+) con anti-conflict
 import os
 import sqlite3
 import logging
 import shutil
+import asyncio as _asyncio
+import time as _time
 from datetime import datetime, timezone, time as dtime
 from pathlib import Path
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import telegram.error as tgerr
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -29,7 +28,10 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR", "./backup")
 BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM — orario server (UTC su Render)
 
 # ===== IMMAGINE DI BENVENUTO =====
-PHOTO_URL = "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg"  # link diretto PostImage
+PHOTO_URL = os.environ.get(
+    "PHOTO_URL",
+    "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg",
+)
 
 # ===== DATABASE =====
 def init_db():
@@ -115,7 +117,6 @@ async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== BACKUP =====
 def _parse_backup_time(time_str: str) -> dtime:
-    """Converte 'HH:MM' in datetime.time per run_daily()."""
     try:
         h, m = map(int, time_str.split(":"))
         return dtime(hour=h, minute=m)
@@ -123,14 +124,12 @@ def _parse_backup_time(time_str: str) -> dtime:
         return dtime(hour=3, minute=0)
 
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Esegue il backup automatico del database e notifica l'admin."""
     try:
         Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(BACKUP_DIR, f"backup_{ts}.db")
         shutil.copy2(DB_FILE, backup_path)
         logger.info(f"💾 Backup creato: {backup_path}")
-
         if ADMIN_ID:
             utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             await context.bot.send_message(
@@ -140,13 +139,9 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Errore nel backup automatico")
         if ADMIN_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"❌ Errore nel backup giornaliero: {e}",
-            )
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup giornaliero: {e}")
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Esegue backup manuale e invia il file all’admin."""
     if ADMIN_ID and update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
         return
@@ -162,7 +157,6 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra l’ultimo file di backup."""
     if not os.path.exists(BACKUP_DIR):
         await update.message.reply_text("Nessun backup trovato.")
         return
@@ -174,25 +168,47 @@ async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(InputFile(ultimo), caption=f"📦 Ultimo backup: {ultimo.name}")
 
 async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Esegue SUBITO il job di backup (come quello giornaliero). Solo admin."""
     if ADMIN_ID and update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
         return
     await update.message.reply_text("⏳ Avvio del backup di test…")
-    # Riutilizziamo lo stesso job del giornaliero, così testiamo anche la notifica admin
     await backup_job(context)
     await update.message.reply_text("✅ Test completato. Controlla i messaggi dell’admin e la cartella backup.")
+
+# ===== UTILS ANTI-CONFLICT =====
+def _anti_conflict_prepare(app):
+    """
+    1) Rimuove eventuali webhook e update pendenti
+    2) Tenta di 'prenotare' lo slot di polling chiamando get_updates
+       Se un'altra istanza è attiva, attende e ritenta alcune volte.
+    """
+    loop = _asyncio.get_event_loop()
+    # sempre: rimuovi webhook e drop pending
+    loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
+    logger.info("🔧 Webhook rimosso e pending updates droppati.")
+
+    # prova ad agganciare il polling slot
+    for i in range(6):  # ~6 tentativi (circa 60s totali)
+        try:
+            loop.run_until_complete(app.bot.get_updates(timeout=1))
+            logger.info("✅ Slot di polling acquisito.")
+            return
+        except tgerr.Conflict as e:
+            wait = 10
+            logger.warning("⚠️ Conflict rilevato (tentativo %d/6): %s — ritento tra %ss",
+                           i + 1, str(e), wait)
+            loop.run_until_complete(_asyncio.sleep(wait))
+        except Exception as e:
+            logger.warning("ℹ️ Attesa prima dell'avvio polling (%s)", e)
+            loop.run_until_complete(_asyncio.sleep(3))
 
 # ===== MAIN =====
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 🔧 Cancella eventuali webhook attivi per evitare conflitti con il polling
-    import asyncio as _asyncio
-    _asyncio.get_event_loop().run_until_complete(
-        app.bot.delete_webhook(drop_pending_updates=True)
-    )
+    # Protezione automatica anti-conflitto
+    _anti_conflict_prepare(app)
 
     # Comandi
     app.add_handler(CommandHandler("start", start))
@@ -201,7 +217,7 @@ def main():
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
-    app.add_handler(CommandHandler("test_backup", test_backup))  # <-- nuovo comando
+    app.add_handler(CommandHandler("test_backup", test_backup))
 
     # Pianifica backup giornaliero (ora server)
     hhmm = _parse_backup_time(BACKUP_TIME)
@@ -213,8 +229,19 @@ def main():
     )
 
     logger.info("🕒 Backup giornaliero pianificato (timezone server).")
-    logger.info("🚀 Bot avviato.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Avvio con retry automatico se compare di nuovo Conflict
+    while True:
+        try:
+            logger.info("🚀 Bot avviato (polling).")
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+            break  # uscita pulita
+        except tgerr.Conflict as e:
+            logger.warning("⚠️ Conflict durante il polling: %s — pulisco webhook e riavvio tra 15s", e)
+            loop = _asyncio.get_event_loop()
+            loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
+            _time.sleep(15)
+            continue
 
 if __name__ == "__main__":
     main()
