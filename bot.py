@@ -56,6 +56,7 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
+
 def add_user(user) -> None:
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -69,6 +70,7 @@ def add_user(user) -> None:
     conn.commit()
     conn.close()
 
+
 def count_users() -> int:
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -76,6 +78,7 @@ def count_users() -> int:
     (n,) = cur.fetchone()
     conn.close()
     return n or 0
+
 
 # ======== HANDLERS PUBBLICI ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -115,6 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=reply_markup,
         )
 
+
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📇 *Contatti*\n"
@@ -124,9 +128,11 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
 
+
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     n = count_users()
     await update.message.reply_text(f"👥 Utenti registrati: {n}")
+
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
@@ -141,6 +147,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ping — Stato bot e backup automatico\n"
         "/help — Aiuto"
     )
+
 
 # ======== HANDLERS BACKUP ========
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,6 +164,7 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"Errore backup: {e}")
 
+
 async def export_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
     if OWNER_ID and user_id != OWNER_ID:
@@ -170,6 +178,7 @@ async def export_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await update.effective_message.reply_text(f"Errore export: {e}")
+
 
 async def test_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
@@ -187,30 +196,32 @@ async def test_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Errore durante il test: {e}")
 
+
 # ======== MYID ========
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 Il tuo ID Telegram è: {update.effective_user.id}")
 
+
 # ======== RESTORE INFO ========
 async def restore_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🧱 *Come ripristinare un backup manualmente*\n\n"
-        "1️⃣ Scarica l’ultimo file `.zip` del backup dal bot (da /backup o /test_backup).\n"
-        "2️⃣ Aprilo e troverai un file come `users-YYYYMMDD-HHMMSS.db`.\n"
-        "3️⃣ Rinominalo in `users.db`.\n"
-        "4️⃣ Sostituisci il file `./data/users.db` nel tuo progetto con questo nuovo.\n"
+        "🧱 <b>Come ripristinare un backup manualmente</b>\n\n"
+        "1️⃣ Scarica l’ultimo file .zip del backup dal bot (da /backup o /test_backup).\n"
+        "2️⃣ Aprilo e troverai un file come <code>users-YYYYMMDD-HHMMSS.db</code>.\n"
+        "3️⃣ Rinominalo in <code>users.db</code>.\n"
+        "4️⃣ Sostituisci il file <code>./data/users.db</code> nel tuo progetto con questo nuovo.\n"
         "5️⃣ Riavvia il bot su Render.\n\n"
         "✅ Al riavvio il bot leggerà tutti gli utenti dal backup e sarà identico a prima.\n\n"
-        "💡 Suggerimento: conserva una copia dei file `.zip` anche su Google Drive o simili, così sei al sicuro."
+        "💡 Suggerimento: conserva una copia dei file .zip anche su Google Drive o simili, così sei al sicuro."
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
 
 # ======== PING ========
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_queue = context.application.job_queue
     if job_queue and job_queue.jobs():
         jobs = job_queue.jobs()
-        # cerco il job del backup
         next_run = None
         for j in jobs:
             if j.name == "daily_db_backup":
@@ -228,18 +239,24 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ Bot attivo, ma nessun backup automatico pianificato!")
 
-# ======== ERROR HANDLER (ti avvisa se succede qualcosa di grave) ========
+
+# ======== ERROR HANDLER (HTML safe) ========
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Eccezione non gestita:", exc_info=context.error)
     try:
         if OWNER_ID:
+            msg = (
+                f"⚠️ <b>Errore runtime:</b>\n"
+                f"<pre>{str(context.error)}</pre>"
+            )
             await context.bot.send_message(
                 chat_id=OWNER_ID,
-                text=f"⚠️ *Errore runtime:*\n`{context.error}`",
-                parse_mode=ParseMode.MARKDOWN,
+                text=msg,
+                parse_mode=ParseMode.HTML,
             )
     except Exception:
         pass
+
 
 # ======== MAIN ========
 def main() -> None:
@@ -273,7 +290,7 @@ def main() -> None:
     app.add_handler(CommandHandler("export_users", export_users_cmd))
     app.add_handler(CommandHandler("test_backup", test_backup_cmd))
 
-    # Error handler globale
+    # Error handler
     app.add_error_handler(error_handler)
 
     # ---- Backup automatico giornaliero ----
@@ -303,17 +320,17 @@ def main() -> None:
             try:
                 await context.bot.send_message(
                     chat_id=OWNER_ID,
-                    text="♻️ Il bot è stato *riavviato* ed è attivo.\nUsa /ping per lo stato della JobQueue.",
-                    parse_mode=ParseMode.MARKDOWN,
+                    text="♻️ Il bot è stato <b>riavviato</b> ed è attivo.\nUsa /ping per lo stato della JobQueue.",
+                    parse_mode=ParseMode.HTML,
                 )
             except Exception:
                 pass
 
-    # invia la notifica 1 secondo dopo l’avvio
     app.job_queue.run_once(notify_startup, when=1)
 
     logger.info("✅ Bot avviato con successo!")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
