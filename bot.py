@@ -5,7 +5,7 @@ import sqlite3
 import logging
 import shutil
 from io import StringIO, BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
 from pathlib import Path
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,7 +31,7 @@ ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "./backup")
 BACKUP_TZ = os.environ.get("BACKUP_TZ", "Etc/UTC")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # formato HH:MM
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # formato HH:MM (ora server)
 
 # ===== DATABASE =====
 def init_db():
@@ -83,14 +83,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎇 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0")],
         [InlineKeyboardButton("📲 Info-Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "👋 Benvenuto! Scegli un’opzione dal menu qui sotto:",
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Comandi disponibili:\n/start - Avvia il bot\n/utenti - Mostra utenti registrati\n/backup - Esegui backup manuale")
+    await update.message.reply_text(
+        "Comandi disponibili:\n"
+        "/start - Avvia il bot\n"
+        "/utenti - Numero utenti registrati\n"
+        "/backup - Backup manuale (solo admin)\n"
+        "/ultimo_backup - Invia ultimo file di backup"
+    )
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong!")
@@ -104,14 +109,13 @@ async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👥 Utenti registrati: {count}")
 
 # ===== BACKUP =====
-def _parse_backup_time(time_str: str):
+def _parse_backup_time(time_str: str) -> dtime:
+    """Converte 'HH:MM' in datetime.time per run_daily()."""
     try:
         h, m = map(int, time_str.split(":"))
-        from telegram.ext import Time
-        return Time(hour=h, minute=m)
+        return dtime(hour=h, minute=m)
     except Exception:
-        from telegram.ext import Time
-        return Time(hour=3, minute=0)
+        return dtime(hour=3, minute=0)
 
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
     """Esegue il backup automatico del database."""
@@ -152,7 +156,9 @@ def main():
 
     # Pulisce eventuali update pendenti
     import asyncio as _asyncio
-    _asyncio.get_event_loop().run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
+    _asyncio.get_event_loop().run_until_complete(
+        app.bot.delete_webhook(drop_pending_updates=True)
+    )
 
     # Comandi
     app.add_handler(CommandHandler("start", start))
@@ -165,9 +171,9 @@ def main():
     # Pianificazione backup giornaliero (fix timezone)
     try:
         from zoneinfo import ZoneInfo
-        tz = ZoneInfo(BACKUP_TZ)
+        tz = ZoneInfo(BACKUP_TZ)  # es. "Europe/Rome" o "Etc/UTC"
     except Exception:
-        tz = timezone.utc
+        tz = timezone.utc  # fallback sicuro su Render
 
     logger.info(f"🕒 Timezone backup impostata su: {tz}")
 
