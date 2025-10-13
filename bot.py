@@ -1,8 +1,8 @@
 # bot.py – Telegram Bot (python-telegram-bot v21+)
 import os
 import sqlite3
-import datetime  # per orario job
-from datetime import datetime as dt  # per timestamp utenti
+import datetime
+from datetime import datetime as dt
 from pathlib import Path
 import logging
 from zoneinfo import ZoneInfo
@@ -14,6 +14,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     JobQueue,
+    Application,
 )
 
 # ======== LOGGING ========
@@ -26,7 +27,6 @@ logger = logging.getLogger(__name__)
 # ======== CONFIG ========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
-
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # tuo user ID Telegram
 TIMEZONE = os.environ.get("TZ", "Europe/Rome")
 
@@ -136,10 +136,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/backup — Backup database (owner)\n"
         "/export_users — Esporta utenti in CSV (owner)\n"
         "/test_backup — Test backup immediato (owner)\n"
+        "/restore_info — Istruzioni per ripristino backup\n"
+        "/myid — Mostra il tuo ID Telegram\n"
+        "/ping — Stato bot e backup automatico\n"
         "/help — Aiuto"
     )
 
-# ======== HANDLERS BACKUP (solo owner) ========
+# ======== HANDLERS BACKUP ========
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
     if OWNER_ID and user_id != OWNER_ID:
@@ -168,7 +171,6 @@ async def export_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"Errore export: {e}")
 
-# ======== TEST BACKUP MANUALE ========
 async def test_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
     if OWNER_ID and user_id != OWNER_ID:
@@ -185,6 +187,60 @@ async def test_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Errore durante il test: {e}")
 
+# ======== MYID ========
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🆔 Il tuo ID Telegram è: {update.effective_user.id}")
+
+# ======== RESTORE INFO ========
+async def restore_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🧱 *Come ripristinare un backup manualmente*\n\n"
+        "1️⃣ Scarica l’ultimo file `.zip` del backup dal bot (da /backup o /test_backup).\n"
+        "2️⃣ Aprilo e troverai un file come `users-YYYYMMDD-HHMMSS.db`.\n"
+        "3️⃣ Rinominalo in `users.db`.\n"
+        "4️⃣ Sostituisci il file `./data/users.db` nel tuo progetto con questo nuovo.\n"
+        "5️⃣ Riavvia il bot su Render.\n\n"
+        "✅ Al riavvio il bot leggerà tutti gli utenti dal backup e sarà identico a prima.\n\n"
+        "💡 Suggerimento: conserva una copia dei file `.zip` anche su Google Drive o simili, così sei al sicuro."
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# ======== PING ========
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    job_queue = context.application.job_queue
+    if job_queue and job_queue.jobs():
+        jobs = job_queue.jobs()
+        # cerco il job del backup
+        next_run = None
+        for j in jobs:
+            if j.name == "daily_db_backup":
+                next_run = j.next_t
+                break
+        if not next_run and jobs:
+            next_run = jobs[0].next_t
+        next_time = (
+            next_run.astimezone(ZoneInfo(TIMEZONE)).strftime("%H:%M del %d/%m")
+            if next_run else "non programmato"
+        )
+        await update.message.reply_text(
+            f"🏓 Bot attivo!\n🕒 Prossimo backup automatico: {next_time}"
+        )
+    else:
+        await update.message.reply_text("⚠️ Bot attivo, ma nessun backup automatico pianificato!")
+
+# ======== ERROR HANDLER (ti avvisa se succede qualcosa di grave) ========
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Eccezione non gestita:", exc_info=context.error)
+    try:
+        if OWNER_ID:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"⚠️ *Errore runtime:*\n`{context.error}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    except Exception:
+        pass
+
 # ======== MAIN ========
 def main() -> None:
     if not BOT_TOKEN:
@@ -194,9 +250,9 @@ def main() -> None:
     init_db()
 
     builder = ApplicationBuilder().token(BOT_TOKEN)
-    app = builder.build()
+    app: Application = builder.build()
 
-    # ✅ FIX job_queue: creazione manuale se mancante
+    # ✅ FIX job_queue
     if not getattr(app, "job_queue", None):
         jq = JobQueue()
         jq.set_application(app)
@@ -208,13 +264,19 @@ def main() -> None:
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("info", info_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("restore_info", restore_info))
+    app.add_handler(CommandHandler("ping", ping))
 
     # Comandi owner
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("export_users", export_users_cmd))
     app.add_handler(CommandHandler("test_backup", test_backup_cmd))
 
-    # ---- Backup automatico giornaliero alle 03:00 ----
+    # Error handler globale
+    app.add_error_handler(error_handler)
+
+    # ---- Backup automatico giornaliero ----
     async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
         try:
             zip_path = make_db_backup()
@@ -234,6 +296,21 @@ def main() -> None:
         time=datetime.time(hour=3, minute=0, tzinfo=ZoneInfo(TIMEZONE)),
         name="daily_db_backup"
     )
+
+    # ---- Notifica di riavvio ----
+    async def notify_startup(context: ContextTypes.DEFAULT_TYPE):
+        if OWNER_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=OWNER_ID,
+                    text="♻️ Il bot è stato *riavviato* ed è attivo.\nUsa /ping per lo stato della JobQueue.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
+
+    # invia la notifica 1 secondo dopo l’avvio
+    app.job_queue.run_once(notify_startup, when=1)
 
     logger.info("✅ Bot avviato con successo!")
     app.run_polling()
