@@ -1,10 +1,8 @@
 # bot.py — BPFARM bot completo (python-telegram-bot v21+)
 import os
-import csv
 import sqlite3
 import logging
 import shutil
-from io import StringIO, BytesIO
 from datetime import datetime, timezone, time as dtime
 from pathlib import Path
 
@@ -12,9 +10,7 @@ from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMark
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
-    filters,
 )
 
 # ===== LOGGING =====
@@ -30,8 +26,7 @@ DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "./backup")
-BACKUP_TZ = os.environ.get("BACKUP_TZ", "Etc/UTC")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # formato HH:MM (ora server)
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM — orario del server (UTC su Render)
 
 # ===== DATABASE =====
 def init_db():
@@ -168,25 +163,16 @@ def main():
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
 
-    # Pianificazione backup giornaliero (fix timezone)
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(BACKUP_TZ)  # es. "Europe/Rome" o "Etc/UTC"
-    except Exception:
-        tz = timezone.utc  # fallback sicuro su Render
-
-    logger.info(f"🕒 Timezone backup impostata su: {tz}")
-
+    # Pianifica backup giornaliero (usa l'orario del server: UTC su Render)
     hhmm = _parse_backup_time(BACKUP_TIME)
     app.job_queue.run_daily(
         backup_job,
         time=hhmm,
         days=(0, 1, 2, 3, 4, 5, 6),  # tutti i giorni
         name="daily_db_backup",
-        timezone=tz,
     )
 
-    logger.info("🕒 Backup giornaliero pianificato.")
+    logger.info("🕒 Backup giornaliero pianificato (timezone server).")
     logger.info("🚀 Bot avviato.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
