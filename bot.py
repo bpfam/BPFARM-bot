@@ -1,4 +1,4 @@
-# bot.py — Telegram Bot (python-telegram-bot v21+)
+# bot.py — BPFARM bot completo (python-telegram-bot v21+)
 import os
 import csv
 import sqlite3
@@ -8,7 +8,7 @@ from io import StringIO, BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 
-from telegram import Update, InputFile
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -17,23 +17,36 @@ from telegram.ext import (
     filters,
 )
 
-# ========== LOGGING ==========
+# ===== LOGGING =====
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("bpfarm-bot")
 
-# ========== CONFIG ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # <-- su Render in Env
+# ===== CONFIG (Render ENV) =====
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
-
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
-ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
-# In alternativa, per test locale, puoi settarlo in chiaro:
-# ADMIN_ID = 8033084779
+ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None  # su Render: 8033084779
 
-# ========== DATABASE ==========
+# Immagine e pulsanti — leggibili da ENV, con i tuoi default già impostati
+WELCOME_PHOTO_URL = os.environ.get(
+    "WELCOME_PHOTO_URL",
+    "https://i.postimg.cc/0QSgSydz/5-F5-DFE41-C80-D-4-FC2-B4-F6-D1058440-B1.jpg",
+)
+
+BTN_MENU_LABEL        = os.environ.get("BTN_MENU_LABEL",        "📖 Menù")
+BTN_SPAIN_LABEL       = os.environ.get("BTN_SPAIN_LABEL",       "🇪🇸 Shiip-Spagna")
+BTN_REVIEWS_LABEL     = os.environ.get("BTN_REVIEWS_LABEL",     "🎇 Recensioni")
+BTN_CONTACTS_LABEL    = os.environ.get("BTN_CONTACTS_LABEL",    "📲 Info-Contatti")
+
+MENU_URL              = os.environ.get("MENU_URL",              "https://t.me/+w3_ePB2hmVwxNmNk")
+SPAIN_URL             = os.environ.get("SPAIN_URL",             "https://t.me/+oNfKAtrBMYA1MmRk")
+RECENSIONI_URL        = os.environ.get("RECENSIONI_URL",        "https://t.me/+fIQWowFYHWZjZWU0")
+CONTATTI_URL          = os.environ.get("CONTATTI_URL",          "https://t.me/+dBuWJRY9sH0xMGE0")
+
+# ===== DATABASE =====
 def ensure_users_table():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
@@ -102,7 +115,7 @@ def build_users_csv_bytes():
     bio.seek(0)
     return bio
 
-# ========== UTILS ==========
+# ===== UTILS =====
 def is_admin(user_id: int) -> bool:
     return True if ADMIN_ID is None else (user_id == ADMIN_ID)
 
@@ -142,34 +155,58 @@ def validate_sqlite_db(db_path: Path) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Errore apertura/verifica SQLite: {e}"
 
-# ========== HANDLERS BASE ==========
+# ===== UI / START =====
+def menu_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(BTN_MENU_LABEL, url=MENU_URL), InlineKeyboardButton(BTN_REVIEWS_LABEL, url=RECENSIONI_URL)],
+        [InlineKeyboardButton(BTN_CONTACTS_LABEL, url=CONTATTI_URL), InlineKeyboardButton(BTN_SPAIN_LABEL, url=SPAIN_URL)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+WELCOME_TEXT = (
+    "🏆 *Benvenuto nel bot ufficiale di BPFAM!*\n\n"
+    "⚡ Serietà e rispetto sono la nostra identità.\n"
+    "💪 Qui si cresce con impegno e determinazione."
+)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user:
         add_user_if_needed(update.effective_user)
-    await update.effective_message.reply_text(
-        "👋 Benvenuto! Ti ho registrato nel database.\n\n"
-        "Comandi utili:\n"
-        "• /utenti — totale utenti salvati\n"
-        "• /export_utenti — esporta CSV (solo admin)\n"
-        "• /backup_db — invia il file users.db (solo admin)\n"
-        "• /restore_db — ripristina DB da file (solo admin)\n"
-        "• /db_status — stato del database\n"
-        "• /whoami — mostra il tuo user_id\n"
-        "• /help — lista comandi"
-    )
 
+    kb = menu_keyboard()
+    try:
+        if WELCOME_PHOTO_URL:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=WELCOME_PHOTO_URL,
+                caption=WELCOME_TEXT,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        else:
+            await update.effective_message.reply_text(
+                WELCOME_TEXT, parse_mode="Markdown", reply_markup=kb
+            )
+    except Exception as e:
+        logger.exception("Errore invio start: %s", e)
+        await update.effective_message.reply_text(
+            "👋 Benvenuto! (immagine non disponibile ora)\nUsa i pulsanti qui sotto.",
+            reply_markup=kb,
+        )
+
+# ===== COMANDI BASE =====
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "ℹ️ Comandi disponibili:\n"
-        "/start — registra l'utente\n"
-        "/utenti — mostra il totale utenti\n"
-        "/export_utenti — esporta CSV (solo admin)\n"
-        "/backup_db — invia il file DB (solo admin)\n"
-        "/restore_db — avvia procedura di ripristino (solo admin)\n"
-        "/annulla_restore — annulla la procedura di ripristino\n"
-        "/db_status — mostra percorso e dimensione DB\n"
-        "/whoami — mostra il tuo user_id\n"
-        "/ping — test rapido"
+        "ℹ️ Comandi:\n"
+        "/start — benvenuto + menu\n"
+        "/utenti — totale utenti\n"
+        "/export_utenti — esporta CSV (admin)\n"
+        "/backup_db — invia DB (admin)\n"
+        "/restore_db — ripristino da file (admin)\n"
+        "/annulla_restore — annulla ripristino\n"
+        "/db_status — stato DB\n"
+        "/whoami — il tuo user_id\n"
+        "/ping — test"
     )
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -183,12 +220,9 @@ async def export_utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update):
         return
     csv_file = build_users_csv_bytes()
-    await update.effective_message.reply_document(
-        document=csv_file,
-        caption="📄 CSV con tutti gli utenti."
-    )
+    await update.effective_message.reply_document(document=csv_file, caption="📄 CSV con tutti gli utenti.")
 
-# ===== /db_status & /whoami (diagnostica) =====
+# ===== Diagnostica =====
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await update.effective_message.reply_text(f"Il tuo user_id è: {u.id if u else 'sconosciuto'}")
@@ -196,20 +230,15 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def db_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = Path(DB_FILE)
     if p.exists():
-        size = 0
         try:
             size = p.stat().st_size
         except Exception:
-            pass
-        await update.effective_message.reply_text(
-            f"DB trovato ✅\nPercorso: {p}\nDimensione: {size} B"
-        )
+            size = 0
+        await update.effective_message.reply_text(f"DB trovato ✅\nPercorso: {p}\nDimensione: {size} B")
     else:
-        await update.effective_message.reply_text(
-            f"DB non trovato ❌\nPercorso atteso: {p}"
-        )
+        await update.effective_message.reply_text(f"DB non trovato ❌\nPercorso atteso: {p}")
 
-# ===== /backup_db robusto =====
+# ===== /backup_db =====
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     logger.info("/backup_db richiesto da user_id=%s", user.id if user else None)
@@ -228,13 +257,12 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename=db_path.name,
             caption="🗂️ Backup del database SQLite."
         )
-        logger.info("DB inviato correttamente (%s)", db_path)
-
+        logger.info("DB inviato (%s)", db_path)
     except Exception as e:
-        logger.exception("Errore durante /backup_db: %s", e)
+        logger.exception("Errore /backup_db: %s", e)
         await update.effective_message.reply_text(f"❌ Errore durante l'invio del DB: {e}")
 
-# ========== RESTORE DB ==========
+# ===== RESTORE DB =====
 RESTORE_FLAG_KEY = "awaiting_restore"
 
 def _incoming_dir() -> Path:
@@ -248,8 +276,8 @@ async def restore_db_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[RESTORE_FLAG_KEY] = True
     await update.effective_message.reply_text(
         "🛠️ Modalità ripristino attivata.\n"
-        "➡️ Inviami ORA come *documento* il file **users.db** (o un CSV esportato dal bot).\n"
-        "• Estensioni supportate: .db, .csv\n"
+        "➡️ Inviami ora come documento il file **users.db** oppure il CSV esportato.\n"
+        "• Supporto: .db, .csv\n"
         "• Farò un backup automatico del DB attuale\n"
         "• Per annullare: /annulla_restore"
     )
@@ -365,7 +393,7 @@ async def restore_db_receive_document(update: Update, context: ContextTypes.DEFA
 
     await message.reply_text("⚠️ Formato non supportato. Invia un file .db (SQLite) oppure .csv esportato dal bot.")
 
-# ========== MAIN ==========
+# ===== MAIN =====
 def main():
     if not BOT_TOKEN:
         raise SystemExit("❌ Imposta BOT_TOKEN nelle variabili d'ambiente.")
@@ -373,13 +401,13 @@ def main():
     ensure_users_table()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 🔒 Azzeriamo qualsiasi webhook e scartiamo update pendenti
+    # Anti-conflitto: rimuove webhook e scarta update pendenti
     import asyncio
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
 
-    # Comandi base
+    # Comandi
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("ping", ping))
@@ -389,13 +417,13 @@ def main():
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("db_status", db_status))
 
-    # Admin: export/backup/restore
+    # Admin
     app.add_handler(CommandHandler("export_utenti", export_utenti))
     app.add_handler(CommandHandler("backup_db", backup_db))
     app.add_handler(CommandHandler("restore_db", restore_db_start))
     app.add_handler(CommandHandler("annulla_restore", restore_db_cancel))
 
-    # Ricezione documenti per /restore_db
+    # Ricezione file per /restore_db
     file_filter = (
         filters.Document.MimeType("application/octet-stream")
         | filters.Document.MimeType("application/x-sqlite3")
