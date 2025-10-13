@@ -1,336 +1,412 @@
-# bot.py – Telegram Bot (python-telegram-bot v21+)
+# bot.py — Telegram Bot (python-telegram-bot v21+)
 import os
+import csv
 import sqlite3
-import datetime
-from datetime import datetime as dt
-from pathlib import Path
 import logging
-from zoneinfo import ZoneInfo
+import shutil
+from io import StringIO, BytesIO
+from datetime import datetime, timezone
+from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from telegram import Update, InputFile
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
-    JobQueue,
-    Application,
+    filters,
 )
 
-# ======== LOGGING ========
+# ========== LOGGING ==========
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bpfarm-bot")
 
-# ======== CONFIG ========
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# ========== CONFIG ==========
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # <-- su Render in Env
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # tuo user ID Telegram
-TIMEZONE = os.environ.get("TZ", "Europe/Rome")
 
-PHOTO_URL = os.environ.get(
-    "PHOTO_URL",
-    "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg",
-)
+ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
+ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
+# In alternativa, per test locale, puoi settarlo in chiaro:
+# ADMIN_ID = 8033084779
 
-# ======== BACKUP UTILS ========
-from backup_utils import make_db_backup, export_users_csv
-
-# ======== DATABASE ========
-def init_db() -> None:
+# ========== DATABASE ==========
+def ensure_users_table():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE,
             username TEXT,
             first_name TEXT,
-            created_at TEXT
+            last_name TEXT,
+            joined_at TEXT
         )
         """
     )
     conn.commit()
     conn.close()
 
-
-def add_user(user) -> None:
+def add_user_if_needed(tg_user):
+    ensure_users_table()
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT OR IGNORE INTO users (id, username, first_name, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, joined_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (user.id, user.username, user.first_name, dt.utcnow().isoformat()),
+        (
+            tg_user.id,
+            tg_user.username,
+            tg_user.first_name,
+            tg_user.last_name,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        ),
     )
     conn.commit()
     conn.close()
 
-
-def count_users() -> int:
+def get_user_count():
+    ensure_users_table()
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM users")
-    (n,) = cur.fetchone()
+    (count,) = cur.fetchone()
     conn.close()
-    return n or 0
+    return count
 
-
-# ======== HANDLERS PUBBLICI ========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user(update.effective_user)
-    message_text = (
-        "🏆 *Benvenuto nel bot ufficiale di BPFAM!*\n\n"
-        "⚡ Serietà e rispetto sono la nostra identità.\n"
-        "💪 Qui si cresce con impegno e determinazione."
+def build_users_csv_bytes():
+    ensure_users_table()
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT user_id, username, first_name, last_name, joined_at FROM users ORDER BY joined_at ASC"
     )
-    keyboard = [
-        [
-            InlineKeyboardButton("📖 Menu", url="https://t.me/+fIQWowFYHWZjZWU0"),
-            InlineKeyboardButton("💥 Recensioni", url="https://t.me/+w3_ePB2hmVwxNmNk"),
-        ],
-        [
-            InlineKeyboardButton("📱 Contatti / Info", url="https://t.me/+dBuWJRY9sH0xMGE0"),
-            InlineKeyboardButton("🇪🇸Shiip Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk"),
-        ],
-        [
-            InlineKeyboardButton("🔗 Link", url="https://t.me/tuocontattoqui"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    rows = cur.fetchall()
+    conn.close()
 
-    if PHOTO_URL and PHOTO_URL.startswith(("http://", "https://")):
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=PHOTO_URL,
-            caption=message_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup,
-        )
-    else:
-        await update.message.reply_text(
-            text=message_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup,
-        )
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["user_id", "username", "first_name", "last_name", "joined_at"])
+    writer.writerows(rows)
+    data = output.getvalue().encode("utf-8")
+    bio = BytesIO(data)
+    bio.name = f"users_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    bio.seek(0)
+    return bio
 
+# ========== UTILS ==========
+def is_admin(user_id: int) -> bool:
+    return True if ADMIN_ID is None else (user_id == ADMIN_ID)
 
-async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "📇 *Contatti*\n"
-        "• Telegram: @tuo_username\n"
-        "• Email: info@example.com\n"
-        "• Orari: 9–18",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+async def require_admin(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    if not is_admin(user.id):
+        try:
+            await update.effective_message.reply_text("❌ Solo l'admin può usare questo comando.")
+        except Exception:
+            pass
+        logger.warning("Accesso negato a user_id=%s per comando admin.", user.id)
+        return False
+    return True
 
+def _ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    n = count_users()
-    await update.message.reply_text(f"👥 Utenti registrati: {n}")
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "/start — Benvenuto\n"
-        "/utenti — Numero utenti\n"
-        "/info — Contatti\n"
-        "/backup — Backup database (owner)\n"
-        "/export_users — Esporta utenti in CSV (owner)\n"
-        "/test_backup — Test backup immediato (owner)\n"
-        "/restore_info — Istruzioni per ripristino backup\n"
-        "/myid — Mostra il tuo ID Telegram\n"
-        "/ping — Stato bot e backup automatico\n"
-        "/help — Aiuto"
-    )
-
-
-# ======== HANDLERS BACKUP ========
-async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else 0
-    if OWNER_ID and user_id != OWNER_ID:
-        return await update.effective_message.reply_text("Solo l'owner può usare questo comando.")
+def validate_sqlite_db(db_path: Path) -> tuple[bool, str]:
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return False, "File assente o vuoto."
     try:
-        zip_path = make_db_backup()
-        await update.effective_message.reply_document(
-            document=open(zip_path, "rb"),
-            filename=os.path.basename(zip_path),
-            caption="Backup database eseguito ✅"
-        )
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("PRAGMA integrity_check;")
+        res = cur.fetchone()
+        if not res or str(res[0]).lower() != "ok":
+            conn.close()
+            return False, "PRAGMA integrity_check non OK."
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
+        has_users = cur.fetchone() is not None
+        conn.close()
+        if not has_users:
+            return False, "Tabella 'users' non trovata nel DB."
+        return True, "OK"
     except Exception as e:
-        await update.effective_message.reply_text(f"Errore backup: {e}")
+        return False, f"Errore apertura/verifica SQLite: {e}"
 
-
-async def export_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else 0
-    if OWNER_ID and user_id != OWNER_ID:
-        return await update.effective_message.reply_text("Solo l'owner può usare questo comando.")
-    try:
-        csv_path = export_users_csv()
-        await update.effective_message.reply_document(
-            document=open(csv_path, "rb"),
-            filename=os.path.basename(csv_path),
-            caption="Export utenti (CSV) ✅"
-        )
-    except Exception as e:
-        await update.effective_message.reply_text(f"Errore export: {e}")
-
-
-async def test_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else 0
-    if OWNER_ID and user_id != OWNER_ID:
-        return await update.effective_message.reply_text("Solo l'owner può usare questo comando.")
-    await update.effective_message.reply_text("⏳ Avvio test backup...")
-    try:
-        zip_path = make_db_backup()
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=open(zip_path, "rb"),
-            filename=os.path.basename(zip_path),
-            caption="✅ Test backup completato con successo!"
-        )
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ Errore durante il test: {e}")
-
-
-# ======== MYID ========
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🆔 Il tuo ID Telegram è: {update.effective_user.id}")
-
-
-# ======== RESTORE INFO ========
-async def restore_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🧱 <b>Come ripristinare un backup manualmente</b>\n\n"
-        "1️⃣ Scarica l’ultimo file .zip del backup dal bot (da /backup o /test_backup).\n"
-        "2️⃣ Aprilo e troverai un file come <code>users-YYYYMMDD-HHMMSS.db</code>.\n"
-        "3️⃣ Rinominalo in <code>users.db</code>.\n"
-        "4️⃣ Sostituisci il file <code>./data/users.db</code> nel tuo progetto con questo nuovo.\n"
-        "5️⃣ Riavvia il bot su Render.\n\n"
-        "✅ Al riavvio il bot leggerà tutti gli utenti dal backup e sarà identico a prima.\n\n"
-        "💡 Suggerimento: conserva una copia dei file .zip anche su Google Drive o simili, così sei al sicuro."
+# ========== HANDLERS BASE ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user:
+        add_user_if_needed(update.effective_user)
+    await update.effective_message.reply_text(
+        "👋 Benvenuto! Ti ho registrato nel database.\n\n"
+        "Comandi utili:\n"
+        "• /utenti — totale utenti salvati\n"
+        "• /export_utenti — esporta CSV (solo admin)\n"
+        "• /backup_db — invia il file users.db (solo admin)\n"
+        "• /restore_db — ripristina DB da file (solo admin)\n"
+        "• /db_status — stato del database\n"
+        "• /whoami — mostra il tuo user_id\n"
+        "• /help — lista comandi"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "ℹ️ Comandi disponibili:\n"
+        "/start — registra l'utente\n"
+        "/utenti — mostra il totale utenti\n"
+        "/export_utenti — esporta CSV (solo admin)\n"
+        "/backup_db — invia il file DB (solo admin)\n"
+        "/restore_db — avvia procedura di ripristino (solo admin)\n"
+        "/annulla_restore — annulla la procedura di ripristino\n"
+        "/db_status — mostra percorso e dimensione DB\n"
+        "/whoami — mostra il tuo user_id\n"
+        "/ping — test rapido"
+    )
 
-# ======== PING ========
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    job_queue = context.application.job_queue
-    if job_queue and job_queue.jobs():
-        jobs = job_queue.jobs()
-        next_run = None
-        for j in jobs:
-            if j.name == "daily_db_backup":
-                next_run = j.next_t
-                break
-        if not next_run and jobs:
-            next_run = jobs[0].next_t
-        next_time = (
-            next_run.astimezone(ZoneInfo(TIMEZONE)).strftime("%H:%M del %d/%m")
-            if next_run else "non programmato"
-        )
-        await update.message.reply_text(
-            f"🏓 Bot attivo!\n🕒 Prossimo backup automatico: {next_time}"
+    await update.effective_message.reply_text("🏓 Pong!")
+
+async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = get_user_count()
+    await update.effective_message.reply_text(f"👥 Utenti salvati: {count}")
+
+async def export_utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+    csv_file = build_users_csv_bytes()
+    await update.effective_message.reply_document(
+        document=csv_file,
+        caption="📄 CSV con tutti gli utenti."
+    )
+
+# ===== /db_status & /whoami (diagnostica) =====
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    await update.effective_message.reply_text(f"Il tuo user_id è: {u.id if u else 'sconosciuto'}")
+
+async def db_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    p = Path(DB_FILE)
+    if p.exists():
+        size = 0
+        try:
+            size = p.stat().st_size
+        except Exception:
+            pass
+        await update.effective_message.reply_text(
+            f"DB trovato ✅\nPercorso: {p}\nDimensione: {size} B"
         )
     else:
-        await update.message.reply_text("⚠️ Bot attivo, ma nessun backup automatico pianificato!")
+        await update.effective_message.reply_text(
+            f"DB non trovato ❌\nPercorso atteso: {p}"
+        )
 
+# ===== /backup_db robusto =====
+async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    logger.info("/backup_db richiesto da user_id=%s", user.id if user else None)
 
-# ======== ERROR HANDLER (HTML safe) ========
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Eccezione non gestita:", exc_info=context.error)
-    try:
-        if OWNER_ID:
-            msg = (
-                f"⚠️ <b>Errore runtime:</b>\n"
-                f"<pre>{str(context.error)}</pre>"
-            )
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=msg,
-                parse_mode=ParseMode.HTML,
-            )
-    except Exception:
-        pass
-
-
-# ======== MAIN ========
-def main() -> None:
-    if not BOT_TOKEN:
-        logger.error("❌ ERRORE: Variabile d'ambiente BOT_TOKEN mancante")
+    if not await require_admin(update):
         return
 
-    init_db()
+    try:
+        db_path = Path(DB_FILE)
+        if not db_path.exists():
+            await update.effective_message.reply_text(f"⚠️ Database non trovato: {db_path}")
+            return
 
-    builder = ApplicationBuilder().token(BOT_TOKEN)
-    app: Application = builder.build()
+        await update.effective_message.reply_document(
+            document=InputFile(str(db_path)),
+            filename=db_path.name,
+            caption="🗂️ Backup del database SQLite."
+        )
+        logger.info("DB inviato correttamente (%s)", db_path)
 
-    # ✅ FIX job_queue
-    if not getattr(app, "job_queue", None):
-        jq = JobQueue()
-        jq.set_application(app)
-        jq.initialize()
-        app.job_queue = jq
+    except Exception as e:
+        logger.exception("Errore durante /backup_db: %s", e)
+        await update.effective_message.reply_text(f"❌ Errore durante l'invio del DB: {e}")
 
-    # Comandi pubblici
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("utenti", utenti))
-    app.add_handler(CommandHandler("info", info_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("myid", myid))
-    app.add_handler(CommandHandler("restore_info", restore_info))
-    app.add_handler(CommandHandler("ping", ping))
+# ========== RESTORE DB ==========
+RESTORE_FLAG_KEY = "awaiting_restore"
 
-    # Comandi owner
-    app.add_handler(CommandHandler("backup", backup_cmd))
-    app.add_handler(CommandHandler("export_users", export_users_cmd))
-    app.add_handler(CommandHandler("test_backup", test_backup_cmd))
+def _incoming_dir() -> Path:
+    p = Path(DB_FILE).parent / "incoming"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
-    # Error handler
-    app.add_error_handler(error_handler)
-
-    # ---- Backup automatico giornaliero ----
-    async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-        try:
-            zip_path = make_db_backup()
-            if OWNER_ID:
-                await context.bot.send_document(
-                    chat_id=OWNER_ID,
-                    document=open(zip_path, "rb"),
-                    filename=os.path.basename(zip_path),
-                    caption="Backup automatico notturno ✅"
-                )
-        except Exception as e:
-            if OWNER_ID:
-                await context.bot.send_message(chat_id=OWNER_ID, text=f"Errore backup automatico: {e}")
-
-    app.job_queue.run_daily(
-        scheduled_backup,
-        time=datetime.time(hour=3, minute=0, tzinfo=ZoneInfo(TIMEZONE)),
-        name="daily_db_backup"
+async def restore_db_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+    context.user_data[RESTORE_FLAG_KEY] = True
+    await update.effective_message.reply_text(
+        "🛠️ Modalità ripristino attivata.\n"
+        "➡️ Inviami ORA come *documento* il file **users.db** (o un CSV esportato dal bot).\n"
+        "• Estensioni supportate: .db, .csv\n"
+        "• Farò un backup automatico del DB attuale\n"
+        "• Per annullare: /annulla_restore"
     )
 
-    # ---- Notifica di riavvio ----
-    async def notify_startup(context: ContextTypes.DEFAULT_TYPE):
-        if OWNER_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=OWNER_ID,
-                    text="♻️ Il bot è stato <b>riavviato</b> ed è attivo.\nUsa /ping per lo stato della JobQueue.",
-                    parse_mode=ParseMode.HTML,
+async def restore_db_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+    context.user_data[RESTORE_FLAG_KEY] = False
+    await update.effective_message.reply_text("❎ Ripristino annullato.")
+
+async def restore_db_receive_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+    if not context.user_data.get(RESTORE_FLAG_KEY):
+        return
+
+    message = update.effective_message
+    doc = message.document
+    if not doc:
+        return
+
+    filename = (doc.file_name or "").lower()
+    is_db = filename.endswith(".db")
+    is_csv = filename.endswith(".csv")
+
+    incoming_path = _incoming_dir() / f"in_{_ts()}_{filename or 'file'}"
+    try:
+        tgfile = await doc.get_file()
+        await tgfile.download_to_drive(custom_path=str(incoming_path))
+    except Exception as e:
+        await message.reply_text(f"❌ Errore nel download del file: {e}")
+        return
+
+    if is_db:
+        ok, reason = validate_sqlite_db(incoming_path)
+        if not ok:
+            await message.reply_text(f"❌ File DB non valido: {reason}")
+            return
+        try:
+            ensure_users_table()
+            db_path = Path(DB_FILE)
+            if db_path.exists():
+                bak_path = db_path.with_name(f"{db_path.stem}.bak_{_ts()}{db_path.suffix}")
+                shutil.copyfile(db_path, bak_path)
+                logger.info("Creato backup DB: %s", bak_path)
+        except Exception as e:
+            await message.reply_text(f"❌ Impossibile creare backup del DB esistente: {e}")
+            return
+        try:
+            shutil.copyfile(incoming_path, DB_FILE)
+        except Exception as e:
+            await message.reply_text(f"❌ Errore nella sostituzione del DB: {e}")
+            return
+
+        context.user_data[RESTORE_FLAG_KEY] = False
+        await message.reply_text("✅ Ripristino completato dal file .db.\nRiavvia il bot se necessario.")
+        return
+
+    if is_csv:
+        try:
+            import csv as _csv
+            rows = []
+            with open(incoming_path, "r", encoding="utf-8") as f:
+                reader = _csv.DictReader(f)
+                for r in reader:
+                    rows.append((
+                        int(r.get("user_id", "0")) if r.get("user_id") else None,
+                        r.get("username"),
+                        r.get("first_name"),
+                        r.get("last_name"),
+                        r.get("joined_at"),
+                    ))
+
+            ensure_users_table()
+            db_path = Path(DB_FILE)
+            if db_path.exists():
+                bak_path = db_path.with_name(f"{db_path.stem}.bak_{_ts()}{db_path.suffix}")
+                shutil.copyfile(db_path, bak_path)
+                logger.info("Creato backup DB: %s", bak_path)
+
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("DROP TABLE IF EXISTS users;")
+            cur.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    joined_at TEXT
                 )
-            except Exception:
-                pass
+                """
+            )
+            cur.executemany(
+                """
+                INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, joined_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+            conn.close()
 
-    app.job_queue.run_once(notify_startup, when=1)
+            context.user_data[RESTORE_FLAG_KEY] = False
+            await message.reply_text("✅ Import da CSV completato. Tabella 'users' ricreata.")
+            return
 
-    logger.info("✅ Bot avviato con successo!")
-    app.run_polling()
+        except Exception as e:
+            await message.reply_text(f"❌ Errore durante l'import CSV: {e}")
+            return
 
+    await message.reply_text("⚠️ Formato non supportato. Invia un file .db (SQLite) oppure .csv esportato dal bot.")
+
+# ========== MAIN ==========
+def main():
+    if not BOT_TOKEN:
+        raise SystemExit("❌ Imposta BOT_TOKEN nelle variabili d'ambiente.")
+
+    ensure_users_table()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # 🔒 Azzeriamo qualsiasi webhook e scartiamo update pendenti
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        app.bot.delete_webhook(drop_pending_updates=True)
+    )
+
+    # Comandi base
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("utenti", utenti))
+
+    # Diagnostica
+    app.add_handler(CommandHandler("whoami", whoami))
+    app.add_handler(CommandHandler("db_status", db_status))
+
+    # Admin: export/backup/restore
+    app.add_handler(CommandHandler("export_utenti", export_utenti))
+    app.add_handler(CommandHandler("backup_db", backup_db))
+    app.add_handler(CommandHandler("restore_db", restore_db_start))
+    app.add_handler(CommandHandler("annulla_restore", restore_db_cancel))
+
+    # Ricezione documenti per /restore_db
+    file_filter = (
+        filters.Document.MimeType("application/octet-stream")
+        | filters.Document.MimeType("application/x-sqlite3")
+        | filters.Document.FileExtension("db")
+        | filters.Document.FileExtension("csv")
+        | filters.Document.ALL
+    )
+    app.add_handler(MessageHandler(file_filter, restore_db_receive_document))
+
+    logger.info("🚀 Bot in esecuzione…")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
