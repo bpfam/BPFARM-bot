@@ -20,16 +20,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bpfarm-bot")
 
-# ===== CONFIG (Render ENV) =====
+# ===== CONFIG =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "./backup")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM — orario del server (UTC su Render)
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM — orario server (UTC su Render)
 
 # ===== IMMAGINE DI BENVENUTO =====
-PHOTO_URL = "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg"  # <-- link diretto PostImage
+PHOTO_URL = "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg"  # link diretto PostImage
 
 # ===== DATABASE =====
 def init_db():
@@ -75,7 +75,6 @@ def salva_utente(update: Update):
 # ===== COMANDI =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salva_utente(update)
-
     keyboard = [
         [InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk")],
         [InlineKeyboardButton("🇪🇸 Shiip-Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk")],
@@ -83,33 +82,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📲 Info-Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0")],
     ]
     markup = InlineKeyboardMarkup(keyboard)
-
     caption = (
         "🏆 Benvenuto nel bot ufficiale di BPFAM!\n\n"
         "⚡ Serietà e rispetto sono la nostra identità.\n"
         "💪 Qui si cresce con impegno e determinazione."
     )
-
     try:
-        await update.message.reply_photo(
-            photo=PHOTO_URL,
-            caption=caption,
-            reply_markup=markup,
-        )
-    except Exception as e:
-        logger.exception("Errore nell'invio della foto di benvenuto")
-        await update.message.reply_text(
-            "👋 Benvenuto! Scegli un’opzione dal menu qui sotto:",
-            reply_markup=markup,
-        )
+        await update.message.reply_photo(photo=PHOTO_URL, caption=caption, reply_markup=markup)
+    except Exception:
+        await update.message.reply_text("👋 Benvenuto! Scegli un’opzione dal menu qui sotto:", reply_markup=markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Comandi disponibili:\n"
-        "/start - Avvia il bot\n"
-        "/utenti - Numero utenti registrati\n"
-        "/backup - Backup manuale (solo admin)\n"
-        "/ultimo_backup - Invia ultimo file di backup"
+        "/start – Avvia il bot\n"
+        "/utenti – Numero utenti registrati\n"
+        "/backup – Backup manuale (solo admin)\n"
+        "/ultimo_backup – Invia ultimo file di backup\n"
+        "/test_backup – Esegue ora il backup automatico (solo admin)"
     )
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -183,12 +173,22 @@ async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ultimo = files[0]
     await update.message.reply_document(InputFile(ultimo), caption=f"📦 Ultimo backup: {ultimo.name}")
 
+async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Esegue SUBITO il job di backup (come quello giornaliero). Solo admin."""
+    if ADMIN_ID and update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
+        return
+    await update.message.reply_text("⏳ Avvio del backup di test…")
+    # Riutilizziamo lo stesso job del giornaliero, così testiamo anche la notifica admin
+    await backup_job(context)
+    await update.message.reply_text("✅ Test completato. Controlla i messaggi dell’admin e la cartella backup.")
+
 # ===== MAIN =====
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Pulisce eventuali update pendenti
+    # 🔧 Cancella eventuali webhook attivi per evitare conflitti con il polling
     import asyncio as _asyncio
     _asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
@@ -201,8 +201,9 @@ def main():
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
+    app.add_handler(CommandHandler("test_backup", test_backup))  # <-- nuovo comando
 
-    # Pianifica backup giornaliero
+    # Pianifica backup giornaliero (ora server)
     hhmm = _parse_backup_time(BACKUP_TIME)
     app.job_queue.run_daily(
         backup_job,
