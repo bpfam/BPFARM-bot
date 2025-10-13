@@ -28,6 +28,9 @@ ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else Non
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "./backup")
 BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM — orario del server (UTC su Render)
 
+# ===== IMMAGINE DI BENVENUTO =====
+PHOTO_URL = "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg"  # <-- link diretto PostImage
+
 # ===== DATABASE =====
 def init_db():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
@@ -72,16 +75,33 @@ def salva_utente(update: Update):
 # ===== COMANDI =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salva_utente(update)
+
     keyboard = [
         [InlineKeyboardButton("📖 Menù", url="https://t.me/+w3_ePB2hmVwxNmNk")],
         [InlineKeyboardButton("🇪🇸 Shiip-Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk")],
         [InlineKeyboardButton("🎇 Recensioni", url="https://t.me/+fIQWowFYHWZjZWU0")],
         [InlineKeyboardButton("📲 Info-Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0")],
     ]
-    await update.message.reply_text(
-        "👋 Benvenuto! Scegli un’opzione dal menu qui sotto:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+    markup = InlineKeyboardMarkup(keyboard)
+
+    caption = (
+        "🏆 Benvenuto nel bot ufficiale di BPFAM!\n\n"
+        "⚡ Serietà e rispetto sono la nostra identità.\n"
+        "💪 Qui si cresce con impegno e determinazione."
     )
+
+    try:
+        await update.message.reply_photo(
+            photo=PHOTO_URL,
+            caption=caption,
+            reply_markup=markup,
+        )
+    except Exception as e:
+        logger.exception("Errore nell'invio della foto di benvenuto")
+        await update.message.reply_text(
+            "👋 Benvenuto! Scegli un’opzione dal menu qui sotto:",
+            reply_markup=markup,
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -121,7 +141,6 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
         shutil.copy2(DB_FILE, backup_path)
         logger.info(f"💾 Backup creato: {backup_path}")
 
-        # Notifica admin (se configurato)
         if ADMIN_ID:
             utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             await context.bot.send_message(
@@ -183,12 +202,12 @@ def main():
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
 
-    # Pianifica backup giornaliero (ora server = UTC su Render)
+    # Pianifica backup giornaliero
     hhmm = _parse_backup_time(BACKUP_TIME)
     app.job_queue.run_daily(
         backup_job,
         time=hhmm,
-        days=(0, 1, 2, 3, 4, 5, 6),  # tutti i giorni
+        days=(0, 1, 2, 3, 4, 5, 6),
         name="daily_db_backup",
     )
 
