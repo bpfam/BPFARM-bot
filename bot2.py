@@ -1,7 +1,6 @@
 # =====================================================
 # bot2.py — BPFAM1 BOT (python-telegram-bot v21+)
-# Versione stabile con immagine, pulsante "Accesso e menù 📋"
-# Backup + Admin + Anti-conflict + Webhook guard
+# Versione definitiva: backup + admin + immagine + no loop error
 # =====================================================
 
 import os
@@ -10,14 +9,14 @@ import logging
 import shutil
 import asyncio as aio
 import csv
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import telegram.error as tgerr
 
-VERSION = "2.0-BPFAM1"
+VERSION = "2.1-BPFAM1"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -32,7 +31,7 @@ DB_FILE = os.environ.get("DB_FILE", "./data/users.db")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8033084779"))
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "./backup")
 
-# Immagine di benvenuto (Postimg)
+# Immagine di benvenuto
 WELCOME_PHOTO_URL = os.environ.get(
     "WELCOME_PHOTO_URL",
     "https://i.postimg.cc/hPgZxyhz/5-F5-DFE41-C80D-4-FC2-B4-F6-D1058440-B1.jpg",
@@ -121,11 +120,11 @@ async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(InputFile(csv_path), filename=csv_path.name)
 
 # ===== BACKUP LOOP =====
-async def daily_backup_loop(app):
+async def daily_backup_loop():
     while True:
         try:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            backup_name = f"users_backup_{now.replace(' ', '_').replace(':', '-')}.db"
+            now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            backup_name = f"users_backup_{now}.db"
             Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
             shutil.copy(DB_FILE, Path(BACKUP_DIR) / backup_name)
             logger.info(f"[BACKUP] Database salvato ({backup_name})")
@@ -134,7 +133,7 @@ async def daily_backup_loop(app):
         await aio.sleep(86400)  # ogni 24 ore
 
 # ===== MAIN =====
-def main():
+async def main():
     init_db()
     logger.info(f"🚀 Avvio BPFAM1 BOT v{VERSION}")
 
@@ -145,10 +144,10 @@ def main():
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("export", export))
 
-    # Avvio loop di backup in background
-    aio.create_task(daily_backup_loop(app))
-
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Avvia il bot e poi il backup in parallelo
+    async with app:
+        aio.create_task(daily_backup_loop())
+        await app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    aio.run(main())
