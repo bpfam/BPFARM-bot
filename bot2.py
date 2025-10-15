@@ -117,11 +117,7 @@ def backup_database() -> Path:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user_if_new(update.effective_user)
 
-    caption = (
-        f"{WELCOME_TITLE}\n\n"
-        "🏆 Benvenuto nel bot ufficiale di BPFARM!\n"
-        "⚡ Serietà e rispetto sono la nostra identità.\n"
-        "💪 Qui si cresce con impegno e determinazione."
+    caption = f"{WELCOME_TITLE}"
     )
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton(BUTTON_TEXT, url=BUTTON_URL)]]
