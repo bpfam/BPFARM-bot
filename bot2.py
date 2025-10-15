@@ -1,10 +1,10 @@
 # =====================================================
 # bot2.py — BPFAM1 BOT (PTB v21+)
-# - Polling stabile (nessun conflict/loop error)
-# - Webhook guard all'avvio
-# - Welcome con immagine + bottone
+# - Polling stabile (senza conflitti / loop error)
+# - Webhook guard
+# - Solo immagine + titolo + pulsanti (no testo extra)
 # - DB utenti + comandi admin
-# - Backup giornaliero tramite JobQueue (no asyncio manuale)
+# - Backup giornaliero con JobQueue
 # =====================================================
 
 import os
@@ -24,11 +24,10 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    JobQueue,
 )
 import telegram.error as tgerr
 
-VERSION = "2.3-jobqueue"
+VERSION = "2.4-clean"
 
 # ---------- LOG ----------
 logging.basicConfig(
@@ -38,7 +37,7 @@ logging.basicConfig(
 log = logging.getLogger("bpfam1")
 
 # ---------- ENV ----------
-BOT_TOKEN    = os.environ.get("BOT_TOKEN")              # token @Bpfam1bot
+BOT_TOKEN    = os.environ.get("BOT_TOKEN")
 ADMIN_ID     = int(os.environ.get("ADMIN_ID", "8033084779"))
 
 DB_FILE      = os.environ.get("DB_FILE", "./data/users_bot2.db")
@@ -117,8 +116,9 @@ def backup_database() -> Path:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user_if_new(update.effective_user)
 
+    # Solo titolo, senza testo extra
     caption = f"{WELCOME_TITLE}"
-    )
+
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton(BUTTON_TEXT, url=BUTTON_URL)]]
     )
@@ -183,22 +183,18 @@ def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("backup_db", backup_now))
 
-    # Post-init: togli webhook e attiva backup giornaliero
     async def _post_init(application):
-        # Webhook guard
         try:
             await application.bot.delete_webhook(drop_pending_updates=True)
             log.info("[GUARD] webhook rimosso + pending updates droppati")
         except Exception as e:
             log.warning(f"[GUARD] delete_webhook fallito: {e}")
 
-        # JobQueue (nessun asyncio manuale)
         bt = parse_backup_time(BACKUP_TIME)
         application.job_queue.run_daily(backup_job, time=bt, name="daily_backup")
         log.info(f"[JOB] backup giornaliero schedulato alle {bt.strftime('%H:%M')}")
@@ -206,7 +202,6 @@ def main():
     app.post_init = _post_init
 
     log.info(f"🚀 Avvio BPFAM1 BOT v{VERSION}")
-    # run_polling gestisce internamente il loop: NIENTE asyncio.run / get_event_loop
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
