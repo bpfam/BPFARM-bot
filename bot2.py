@@ -144,10 +144,15 @@ async def main():
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("export", export))
 
-    # Avvia il bot e poi il backup in parallelo
-    async with app:
-        aio.create_task(daily_backup_loop())
-        await app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Avvia il backup in parallelo
+    aio.create_task(daily_backup_loop())
+
+    # Avvia polling (senza chiudere il loop)
+    await app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    aio.run(main())
+    # Su Render usiamo già un event loop, quindi avviamo direttamente
+    try:
+        aio.get_event_loop().run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
