@@ -1,7 +1,7 @@
 # =====================================================
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
-# Anti-conflict strong + Webhook guard + Backup + /status
-# + Admin: /list /export /broadcast
+# Anti-conflict strong + Webhook guard + Backup giornaliero
+# Admin blindati + Pulsanti dinamici (cartelle personalizzate)
 # =====================================================
 
 import os
@@ -15,7 +15,7 @@ from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, filters
 import telegram.error as tgerr
 
 VERSION = "1.6-admin"
@@ -31,24 +31,41 @@ logger = logging.getLogger("bpfarm-bot")
 BOT_TOKEN   = os.environ.get("BOT_TOKEN")
 DB_FILE     = os.environ.get("DB_FILE", "./data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "./backup")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM (ora server, UTC su Render)
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")
+ADMIN_ID    = int(os.environ.get("ADMIN_ID", "8033084779"))
 
-ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
-ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
-
-# Immagine di benvenuto (link diretto .jpg/.png)
+# Immagine di benvenuto
 PHOTO_URL = os.environ.get(
     "PHOTO_URL",
-    "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg",
+    "https://i.postimg.cc/ZRVjp1w5/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664-B3.jpg",
 )
+
+# ===== PULSANTI DINAMICI =====
+def _load_dynamic_buttons():
+    buttons = []
+    for i in range(1, 13):
+        label = os.environ.get(f"BTN{i}_LABEL", "").strip()
+        url   = os.environ.get(f"BTN{i}_URL", "").strip()
+        if label and url:
+            buttons.append((label, url))
+    return buttons
+
+DYNAMIC_BUTTONS = _load_dynamic_buttons()
+
+def _user_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for label, url in DYNAMIC_BUTTONS:
+        rows.append([InlineKeyboardButton(label, url=url)])  # 1 per riga
+    if not rows:
+        rows = [[InlineKeyboardButton("📂 Nessuna cartella configurata", url="https://t.me/")]]
+    return InlineKeyboardMarkup(rows)
 
 # ===== DATABASE =====
 def init_db():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id     INTEGER PRIMARY KEY,
             username    TEXT,
@@ -56,8 +73,7 @@ def init_db():
             last_name   TEXT,
             joined      TEXT
         )
-        """
-    )
+    """)
     conn.commit()
     conn.close()
 
@@ -81,7 +97,6 @@ def count_users() -> int:
     return n
 
 def get_all_users():
-    """Ritorna lista di dict: [{'user_id':..., 'username':..., 'first_name':..., 'last_name':..., 'joined':...}, ...]"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -103,7 +118,7 @@ def _next_backup_utc() -> datetime:
     now = datetime.now(timezone.utc)
     candidate = datetime.combine(date.today(), run_t, tzinfo=timezone.utc)
     if candidate <= now:
-        candidate = candidate + timedelta(days=1)
+        candidate += timedelta(days=1)
     return candidate
 
 def _last_backup_file() -> Path | None:
@@ -114,48 +129,54 @@ def _last_backup_file() -> Path | None:
     return files[0] if files else None
 
 def _is_admin(user_id: int) -> bool:
-    return ADMIN_ID is not None and user_id == ADMIN_ID
+    return user_id == ADMIN_ID
 
-# ===== HANDLERS UTENTE =====
+async def _deny_non_admin(update: Update, text="❌ Comando riservato all’amministratore."):
+    try:
+        if update.message:
+            await update.message.reply_text(text)
+        elif update.callback_query:
+            await update.callback_query.answer(text, show_alert=True)
+    except Exception:
+        pass
+
+# ===== HANDLERS PUBBLICI =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
-        add_user(user.id, user.username, user.first_name, user.last_name)
+        add_user(user.id, user.username or "", user.first_name or "", user.last_name or "")
 
-    keyboard = [
-        [InlineKeyboardButton("📖 Menù",          url="https://t.me/+w3_ePB2hmVwxNmNk")],
-        [InlineKeyboardButton("🇪🇸 Shiip-Spagna", url="https://t.me/+oNfKAtrBMYA1MmRk")],
-        [InlineKeyboardButton("🎇 Recensioni",    url="https://t.me/+fIQWowFYHWZjZWU0")],
-        [InlineKeyboardButton("📲 Info-Contatti", url="https://t.me/+dBuWJRY9sH0xMGE0")],
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
     caption = (
-        "🏆 Benvenuto nel bot ufficiale di BPFARM!\n\n"
+        "🏆 Benvenuto nel bot ufficiale di <b>BPFARM</b>!\n"
         "⚡ Serietà e rispetto sono la nostra identità.\n"
         "💪 Qui si cresce con impegno e determinazione."
     )
+
     try:
-        await update.message.reply_photo(photo=PHOTO_URL, caption=caption, reply_markup=markup)
+        await update.message.reply_photo(photo=PHOTO_URL, caption=caption, parse_mode="HTML", reply_markup=_user_keyboard())
     except Exception:
-        await update.message.reply_text("👋 Benvenuto! Scegli un’opzione dal menu qui sotto:", reply_markup=markup)
+        await update.message.reply_text(caption, parse_mode="HTML", reply_markup=_user_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    text = (
         "Comandi disponibili:\n"
-        "/start – Benvenuto + menu\n"
+        "/start – Benvenuto + cartelle\n"
         "/help – Questo aiuto\n"
         "/ping – Test rapido\n"
         "/utenti – Numero utenti registrati\n"
-        "/ultimo_backup – Invia l’ultimo file di backup\n"
-        "/status – Stato del bot (versione/ora/prossimo backup/utenti)\n"
-        "\n"
-        "Solo Admin:\n"
-        "/backup – Backup manuale\n"
-        "/test_backup – Esegue ora il job di backup\n"
-        "/list – Elenco utenti\n"
-        "/export – CSV utenti\n"
-        "/broadcast <testo> – Messaggio a tutti"
     )
+    if _is_admin(update.effective_user.id):
+        text += (
+            "\nSolo Admin:\n"
+            "/status – Stato del bot\n"
+            "/backup – Backup manuale\n"
+            "/test_backup – Backup ora\n"
+            "/ultimo_backup – Invia ultimo backup\n"
+            "/list – Elenco utenti\n"
+            "/export – CSV utenti\n"
+            "/broadcast <testo> – Messaggio a tutti\n"
+        )
+    await update.message.reply_text(text)
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong! Il bot è attivo.")
@@ -163,19 +184,16 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👥 Utenti registrati: {count_users()}")
 
+# ===== ADMIN =====
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return await _deny_non_admin(update)
     now_utc = datetime.now(timezone.utc)
     next_bu = _next_backup_utc()
     last = _last_backup_file()
     last_line = f"📦 Ultimo backup: {last.name}" if last else "📦 Ultimo backup: nessuno"
     await update.message.reply_text(
-        "🔎 **Stato bot**\n"
-        f"• Versione: {VERSION}\n"
-        f"• Ora server (UTC): {now_utc:%Y-%m-%d %H:%M:%S}\n"
-        f"• Prossimo backup (UTC): {next_bu:%Y-%m-%d %H:%M}\n"
-        f"• Utenti registrati: {count_users()}\n"
-        f"{last_line}",
-        disable_web_page_preview=True,
+        f"🔎 Stato bot\n• Versione: {VERSION}\n• Ora server (UTC): {now_utc:%Y-%m-%d %H:%M:%S}\n• Prossimo backup (UTC): {next_bu:%Y-%m-%d %H:%M}\n• Utenti: {count_users()}\n{last_line}"
     )
 
 # ===== BACKUP =====
@@ -185,195 +203,129 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_path = Path(BACKUP_DIR) / f"backup_{ts}.db"
         shutil.copy2(DB_FILE, backup_path)
-        logger.info(f"💾 Backup creato: {backup_path}")
+        os.chmod(backup_path, 0o600)
         if ADMIN_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"✅ Backup giornaliero completato.\n🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n📦 {backup_path.name}",
-            )
+            await context.bot.send_document(chat_id=ADMIN_ID, document=InputFile(str(backup_path)))
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"✅ Backup completato: {backup_path.name}")
     except Exception as e:
-        logger.exception("Errore nel backup automatico")
-        if ADMIN_ID:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup: {e}")
+        logger.error(f"Errore backup: {e}")
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
-        return
-    try:
-        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = Path(BACKUP_DIR) / f"manual_backup_{ts}.db"
-        shutil.copy2(DB_FILE, backup_path)
-        await update.message.reply_document(InputFile(str(backup_path)), caption="💾 Backup manuale completato.")
-        logger.info(f"💾 Backup manuale eseguito: {backup_path}")
-    except Exception as e:
-        logger.exception("Errore backup manuale")
-        await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
+        return await _deny_non_admin(update)
+    await backup_job(context)
+    await update.message.reply_text("💾 Backup manuale completato (inviato all’admin).")
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    p = Path(BACKUP_DIR)
-    if not p.exists():
-        await update.message.reply_text("Nessun backup trovato.")
-        return
-    files = sorted(p.glob("*.db"), reverse=True)
-    if not files:
-        await update.message.reply_text("Nessun backup disponibile.")
-        return
-    ultimo = files[0]
-    await update.message.reply_document(InputFile(str(ultimo)), caption=f"📦 Ultimo backup: {ultimo.name}")
+    if not _is_admin(update.effective_user.id):
+        return await _deny_non_admin(update)
+    last = _last_backup_file()
+    if not last:
+        return await update.message.reply_text("Nessun backup trovato.")
+    await context.bot.send_document(chat_id=ADMIN_ID, document=InputFile(str(last)))
+    await update.message.reply_text(f"📦 Ultimo backup inviato all’admin ({last.name}).")
 
 async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
-        return
-    await update.message.reply_text("⏳ Avvio backup di test…")
+        return await _deny_non_admin(update)
     await backup_job(context)
-    await update.message.reply_text("✅ Test completato. Controlla messaggio all’admin e cartella backup.")
+    await update.message.reply_text("✅ Backup di test completato.")
 
 # ===== ADMIN: LIST / EXPORT / BROADCAST =====
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
-        return
+        return await _deny_non_admin(update)
     users = get_all_users()
     if not users:
-        await update.message.reply_text("📋 Nessun utente registrato.")
-        return
-    header = f"📋 Elenco utenti ({len(users)} totali)\n"
-    chunk = header
-    for i, u in enumerate(users, start=1):
-        uname = f"@{u['username']}" if u['username'] else "-"
-        line = f"{i}. {uname} ({u['user_id']})\n"
-        # evita messaggi troppo lunghi
-        if len(chunk) + len(line) > 3500:
-            await update.message.reply_text(chunk)
-            chunk = ""
-        chunk += line
-    if chunk:
-        await update.message.reply_text(chunk)
+        return await update.message.reply_text("📋 Nessun utente registrato.")
+    lines = [f"{i+1}. @{u['username'] or '-'} ({u['user_id']})" for i, u in enumerate(users)]
+    text = "\n".join(lines)
+    await update.message.reply_text(f"📋 Utenti ({len(users)}):\n{text[:3500]}")
 
 async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
-        return
+        return await _deny_non_admin(update)
     users = get_all_users()
     Path("./exports").mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     csv_path = Path("./exports") / f"users_export_{ts}.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["user_id", "username", "first_name", "last_name", "joined"])
         for u in users:
             w.writerow([u["user_id"], u["username"] or "", u["first_name"] or "", u["last_name"] or "", u["joined"] or ""])
-    await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)")
+    os.chmod(csv_path, 0o600)
+    await context.bot.send_document(chat_id=ADMIN_ID, document=InputFile(str(csv_path)))
+    await update.message.reply_text(f"📤 Export utenti ({len(users)} record) inviato all’amministratore.")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
-        return
-
-    # testo dopo il comando (es: /broadcast Ciao a tutti!)
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text and update.message and update.message.reply_to_message:
-        # se il comando è in reply, usa il testo del messaggio a cui stai rispondendo
-        text = (update.message.reply_to_message.text or "").strip()
-
+        return await _deny_non_admin(update)
+    text = " ".join(context.args).strip()
     if not text:
-        await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast")
-        return
-
+        return await update.message.reply_text("ℹ️ Usa: /broadcast <testo>")
     users = get_all_users()
-    if not users:
-        await update.message.reply_text("❕ Nessun utente a cui inviare.")
-        return
-
-    ok = 0
-    fail = 0
+    ok = fail = 0
     await update.message.reply_text(f"📣 Invio a {len(users)} utenti…")
     for u in users:
         try:
             await context.bot.send_message(chat_id=u["user_id"], text=text)
             ok += 1
-            await aio.sleep(0.05)  # piccolo rate limit
+            await aio.sleep(0.05)
         except Exception:
             fail += 1
-            await aio.sleep(0.05)
+    await update.message.reply_text(f"✅ Inviati: {ok} | ❌ Errori: {fail}")
 
-    await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}")
-
-# ===== WEBHOOK GUARD =====
+# ===== GUARDIANI =====
 async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await context.bot.get_webhook_info()
         if info and info.url:
-            logger.warning(f"🛡️ Webhook inatteso rilevato: {info.url} — lo rimuovo.")
             await context.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🛡️ Webhook rimosso dal guardiano.")
     except Exception as e:
-        logger.debug(f"Guardiano webhook: {e}")
+        logger.debug(f"Webhook guard error: {e}")
 
-# ===== ANTI-CONFLICT (strong) =====
 def anti_conflict_prepare(app):
     loop = aio.get_event_loop()
     loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     logger.info("🔧 Webhook rimosso + pending updates droppati.")
-    for i in range(6):  # 6 tentativi x 10s = ~1 min
+    for i in range(6):
         try:
             loop.run_until_complete(app.bot.get_updates(timeout=1))
-            logger.info("✅ Slot di polling acquisito.")
             return
-        except tgerr.Conflict as e:
-            wait = 10
-            logger.warning(f"⚠️ Conflict (tentativo {i+1}/6): {e}. Riprovo tra {wait}s…")
-            loop.run_until_complete(aio.sleep(wait))
-        except Exception as e:
-            logger.warning(f"ℹ️ Attendo e riprovo get_updates… ({e})")
+        except tgerr.Conflict:
+            loop.run_until_complete(aio.sleep(10))
+        except Exception:
             loop.run_until_complete(aio.sleep(3))
 
 # ===== MAIN =====
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Anti-conflict all'avvio
     anti_conflict_prepare(app)
 
-    # Comandi
+    # Comandi pubblici
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("utenti", utenti))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("ultimo_backup", ultimo_backup))
 
-    # Admin
-    app.add_handler(CommandHandler("backup", backup_command))
-    app.add_handler(CommandHandler("test_backup", test_backup))
-    app.add_handler(CommandHandler("list", list_users))
-    app.add_handler(CommandHandler("export", export_users))
-    app.add_handler(CommandHandler("broadcast", broadcast))
+    # Admin filtrati
+    F = filters.User(user_id=ADMIN_ID)
+    app.add_handler(CommandHandler("status", status_command, filters=F))
+    app.add_handler(CommandHandler("backup", backup_command, filters=F))
+    app.add_handler(CommandHandler("test_backup", test_backup, filters=F))
+    app.add_handler(CommandHandler("ultimo_backup", ultimo_backup, filters=F))
+    app.add_handler(CommandHandler("list", list_users, filters=F))
+    app.add_handler(CommandHandler("export", export_users, filters=F))
+    app.add_handler(CommandHandler("broadcast", broadcast, filters=F))
 
-    # Guardiano ogni 10 minuti
-    app.job_queue.run_repeating(webhook_guard, interval=600, first=60, name="webhook_guard")
+    # Job periodici
+    app.job_queue.run_repeating(webhook_guard, interval=600, first=60)
+    app.job_queue.run_daily(backup_job, time=_parse_backup_time(BACKUP_TIME))
 
-    # Backup giornaliero (ora server UTC)
-    hhmm = _parse_backup_time(BACKUP_TIME)
-    app.job_queue.run_daily(backup_job, time=hhmm, days=(0,1,2,3,4,5,6), name="daily_db_backup")
-    logger.info("🕒 Backup giornaliero pianificato (timezone server).")
-
-    # Avvio con retry anti-conflict
-    while True:
-        try:
-            logger.info("🚀 Bot avviato (polling).")
-            app.run_polling(allowed_updates=Update.ALL_TYPES)
-            break
-        except tgerr.Conflict as e:
-            logger.warning(f"⚠️ Conflict durante il polling: {e}. Pulisco webhook e riavvio tra 15s…")
-            loop = aio.get_event_loop()
-            loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
-            pytime.sleep(15)
-            continue
+    logger.info("🚀 Bot avviato (polling mode).")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
