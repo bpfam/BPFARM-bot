@@ -2,12 +2,11 @@
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
 # UI: 5 bottoni in home (📖 Menù + 4 sezioni) | Sezioni: 🔙 Back
 # Un SOLO messaggio pannello (edit in-place, nessun duplicato)
-# ULTRA-BLINDATO:
-#  - Solo ADMIN vede/usa: /status /backup /ultimo_backup /test_backup /list /export /broadcast /utenti
-#  - Non-admin: silenzio sui comandi sensibili + notifica all'ADMIN
-# Extra: Sezione 📲 Info & Contatti con:
-#        - 📁 Contatti => immagine + testo + bottoni URL (callback tollerante)
-#        - ℹ️ Info => Delivery / Meet-Up / Point
+# ULTRA-BLINDATO (admin-only su comandi sensibili)
+# Extra: Sezione 📲 Info & Contatti
+#   - 📁 Contatti: immagine + testo + bottoni URL
+#     (callback tollerante + gestione caption lunga + fallback)
+#   - ℹ️ Info: overview + Delivery / Meet-Up / Point
 # =====================================================
 
 import os
@@ -29,7 +28,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "3.1-info-contacts-tolerant"
+VERSION = "3.2-info-contacts-safe"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -188,7 +187,7 @@ def _kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
 
 def _kb_info_root() -> InlineKeyboardMarkup:
-    # Callback "contacts:open" (+ tolleranza gestita in on_callback)
+    # callback tollerante per Contatti
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📁 Contatti", callback_data="contacts:open"),
@@ -286,7 +285,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[PANEL_KEY] = panel_id  # usa SEMPRE il messaggio del click
 
     data = (q.data or "").strip()
-    logger.info(f"CB DATA: {data!r}")  # debug utile
+    logger.info(f"CB DATA: {data!r}")  # debug
 
     if data == "home":
         await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home())
@@ -300,17 +299,60 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === CONTATTI: gestisci PRIMA della regola generica "sec:" ===
     if data in ("contacts:open", "info:contacts", "sec:contacts", "contatti"):
+        caption = CONTACTS_TEXT
+        kb = _kb_contacts()
+
+        async def _send_contacts_with_safe_caption():
+            short_cap = "💎 *BPFAM CONTATTI UFFICIALI* 💎"
+            try:
+                # 1) Foto con caption corta
+                if INFO_CONTACTS_IMAGE_URL:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=INFO_CONTACTS_IMAGE_URL,
+                        caption=short_cap,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                    )
+                # 2) Testo completo + bottoni
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=CONTACTS_TEXT,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            except Exception as e2:
+                logger.exception(f"Contatti fallback send_message failed: {e2}")
+                await _edit_panel(context, chat_id, panel_id, CONTACTS_TEXT, kb)
+
         try:
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=INFO_CONTACTS_IMAGE_URL or "https://i.imgur.com/404.png",
-                caption=CONTACTS_TEXT,
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-                reply_markup=_kb_contacts(),
-            )
-        except Exception:
-            await _edit_panel(context, chat_id, panel_id, CONTACTS_TEXT, _kb_contacts())
+            # Se caption è troppo lunga, uso la strategia sicura
+            if len(caption) > 1000:
+                await _send_contacts_with_safe_caption()
+                return
+
+            # Foto con caption completa + bottoni (se possibile)
+            if INFO_CONTACTS_IMAGE_URL:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=INFO_CONTACTS_IMAGE_URL,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=CONTACTS_TEXT,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+        except Exception as e:
+            logger.warning(f"send_photo contacts failed ({type(e).__name__}): {e}")
+            await _send_contacts_with_safe_caption()
         return
 
     # ℹ️ Info: menu
