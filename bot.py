@@ -6,7 +6,7 @@
 #  - Solo ADMIN vede/usa: /status /backup /ultimo_backup /test_backup /list /export /broadcast /utenti
 #  - Non-admin: silenzio sui comandi sensibili + notifica all'ADMIN
 # Extra: Sezione 📲 Info & Contatti con:
-#        - 📇 Contatti => immagine + testo + bottoni URL
+#        - 📁 Contatti => immagine + testo + bottoni URL (callback tollerante)
 #        - ℹ️ Info => Delivery / Meet-Up / Point
 # =====================================================
 
@@ -29,7 +29,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "3.0-info-contacts"
+VERSION = "3.1-info-contacts-tolerant"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -188,9 +188,10 @@ def _kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
 
 def _kb_info_root() -> InlineKeyboardMarkup:
+    # Callback "contacts:open" (+ tolleranza gestita in on_callback)
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🗂️ Contatti", callback_data="info:contacts"),
+            InlineKeyboardButton("📁 Contatti", callback_data="contacts:open"),
             InlineKeyboardButton("ℹ️ Info",     callback_data="info:overview"),
         ],
         [InlineKeyboardButton("🔙 Back", callback_data="home")],
@@ -284,7 +285,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     panel_id = q.message.message_id
     context.user_data[PANEL_KEY] = panel_id  # usa SEMPRE il messaggio del click
 
-    data = q.data or ""
+    data = (q.data or "").strip()
+    logger.info(f"CB DATA: {data!r}")  # debug utile
+
     if data == "home":
         await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home())
         return
@@ -295,15 +298,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _edit_panel(context, chat_id, panel_id, text, _kb_info_root())
         return
 
-    # Sezioni standard
-    if data.startswith("sec:"):
-        key = data.split(":", 1)[1]
-        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back())
-        return
-
-    # ===== Sotto-sezioni INFO & CONTATTI =====
-    # 📇 Contatti: immagine + testo + bottoni URL
-    if data == "info:contacts":
+    # === CONTATTI: gestisci PRIMA della regola generica "sec:" ===
+    if data in ("contacts:open", "info:contacts", "sec:contacts", "contatti"):
         try:
             await context.bot.send_photo(
                 chat_id=chat_id,
@@ -331,6 +327,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "info:point":
         await _edit_panel(context, chat_id, panel_id, PAGES.get("info_point", "—"), _kb_info_menu())
+        return
+
+    # Sezioni standard (generic "sec:*")
+    if data.startswith("sec:"):
+        key = data.split(":", 1)[1]
+        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back())
         return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
