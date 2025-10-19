@@ -1,8 +1,8 @@
 # =====================================================
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
-# Menu interno (callback + 🔙 Back) + testi da ENV su Render
-# Anti-conflict strong + Webhook guard + Backup + /status
-# Admin: /list /export /broadcast
+# Start: 1 messaggio (foto + caption + bottoni)
+# Menu interno (callback + 🔙 Back + 📖 Menù) | Testi da ENV (PAGE_...)
+# Sezione 📍🇮🇹 Point Attivi | Backup | Admin | Anti-conflict | Webhook guard
 # =====================================================
 
 import os
@@ -16,15 +16,10 @@ from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 import telegram.error as tgerr
 
-VERSION = "1.8-env-pages"
+VERSION = "2.1-menu-button"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -37,77 +32,57 @@ logger = logging.getLogger("bpfarm-bot")
 BOT_TOKEN   = os.environ.get("BOT_TOKEN")
 DB_FILE     = os.environ.get("DB_FILE", "./data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "./backup")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM (ora server, UTC su Render)
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # HH:MM (UTC su Render)
 
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
 
-# Immagine di benvenuto (link diretto .jpg/.png)
+# Immagine + caption breve dello /start
 PHOTO_URL = os.environ.get(
     "PHOTO_URL",
     "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg",
 )
-
-# ===== LETTURA TESTI PAGINE DA ENV =====
-# Suggerimento: in Render → Environment → Edit
-# aggiungi/edita le variabili: PAGE_MAIN, PAGE_SHIPSPAGNA, PAGE_RECENSIONI, PAGE_INFO
-# Puoi usare anche "\n" per andare a capo: verrà convertito in newline.
-
-DEFAULT_MAIN = (
-    "🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n\n"
-    "Scegli una sezione:\n"
-    "• 🇪🇸 *Shiip-Spagna* — informazioni, regole, spedizioni\n"
-    "• 🎇 *Recensioni* — feedback e testimonianze\n"
-    "• 📲 *Info-Contatti* — contatti, help, note\n\n"
+CAPTION_MAIN = os.environ.get(
+    "CAPTION_MAIN",
+    "🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n"
     "⚡ Serietà e rispetto sono la nostra identità.\n"
     "💪 Qui si cresce con impegno e determinazione."
 )
-DEFAULT_SHIP = (
-    "🇪🇸 *Shiip-Spagna*\n\n"
-    "Scrivi qui tutto il testo che vuoi (regole, costi, tempi, FAQ...).\n"
-    "Il bot dividerà automaticamente i messaggi se sono molto lunghi."
+
+# ===== TESTI PAGINE (lettura da ENV) =====
+DEFAULT_MAIN = (
+    "Scegli una sezione:\n"
+    "• 🇪🇸 *Shiip-Spagna* — informazioni, regole, spedizioni\n"
+    "• 🎇 *Recensioni* — feedback e testimonianze\n"
+    "• 📲 *Info-Contatti* — contatti, help, note\n"
+    "• 📍🇮🇹 *Point Attivi* — sedi e punti attivi"
 )
-DEFAULT_REVIEW = (
-    "🎇 *Recensioni*\n\n"
-    "— “Servizio top, consigliatissimo!”\n"
-    "— “Precisi e puntuali.”\n"
-    "— “Ottima comunicazione e supporto.”"
-)
-DEFAULT_INFO = (
-    "📲 *Info & Contatti*\n\n"
-    "• Admin: @tuo_username\n"
-    "• Orari: Lun–Sab, 09:00–19:00\n"
-    "• Note: Rispondiamo entro poche ore."
-)
+DEFAULT_SHIP  = "🇪🇸 *Shiip-Spagna*\n\nScrivi qui info su spedizioni, regole, tempi, costi, FAQ…"
+DEFAULT_REVIEW= "🎇 *Recensioni*\n\n⭐️ “Servizio top!”\n⭐️ “Sempre precisi e veloci!”"
+DEFAULT_INFO  = "📲 *Info & Contatti*\n\n👤 Admin: @tuo_username\n🕒 Lun–Sab, 09:00–19:00"
+DEFAULT_POINT = "📍🇮🇹 *Point Attivi*\n\n• Roma\n• Milano\n• Napoli\n• Torino"
 
 def _normalize_env_text(v: str | None, default: str) -> str:
-    """
-    Ritorna il testo dall'ENV (se presente), altrimenti default.
-    Converte le sequenze '\\n' in newline reali.
-    Se il valore inizia con 'file://', prova a leggere il file locale (opzionale).
-    """
     if not v:
         return default
     v = v.replace("\\n", "\n")
     if v.startswith("file://"):
-        path = v[7:]
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                txt = f.read()
-            return txt
+            with open(v[7:], "r", encoding="utf-8") as f:
+                return f.read()
         except Exception as e:
-            logger.warning(f"Impossibile leggere {path}: {e}. Uso valore ENV grezzo.")
+            logger.warning(f"Errore lettura {v}: {e}")
     return v
 
 def _load_pages_from_env():
     return {
-        "main": _normalize_env_text(os.environ.get("PAGE_MAIN"), DEFAULT_MAIN),
-        "shipspagna": _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"), DEFAULT_SHIP),
-        "recensioni": _normalize_env_text(os.environ.get("PAGE_RECENSIONI"), DEFAULT_REVIEW),
-        "infocontatti": _normalize_env_text(os.environ.get("PAGE_INFO"), DEFAULT_INFO),
+        "main":        _normalize_env_text(os.environ.get("PAGE_MAIN"),        DEFAULT_MAIN),
+        "shipspagna":  _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"),  DEFAULT_SHIP),
+        "recensioni":  _normalize_env_text(os.environ.get("PAGE_RECENSIONI"),  DEFAULT_REVIEW),
+        "infocontatti":_normalize_env_text(os.environ.get("PAGE_INFO"),        DEFAULT_INFO),
+        "pointattivi": _normalize_env_text(os.environ.get("PAGE_POINTATTIVI"), DEFAULT_POINT),
     }
 
-# Carica all'avvio; se modifichi ENV e ridistribuisci, i nuovi testi vengono letti
 PAGES = _load_pages_from_env()
 
 # ===== DATABASE =====
@@ -115,8 +90,7 @@ def init_db():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id     INTEGER PRIMARY KEY,
             username    TEXT,
@@ -124,8 +98,7 @@ def init_db():
             last_name   TEXT,
             joined      TEXT
         )
-        """
-    )
+    """)
     conn.commit()
     conn.close()
 
@@ -170,7 +143,7 @@ def _next_backup_utc() -> datetime:
     now = datetime.now(timezone.utc)
     candidate = datetime.combine(date.today(), run_t, tzinfo=timezone.utc)
     if candidate <= now:
-        candidate = candidate + timedelta(days=1)
+        candidate += timedelta(days=1)
     return candidate
 
 def _last_backup_file() -> Path | None:
@@ -183,45 +156,49 @@ def _last_backup_file() -> Path | None:
 def _is_admin(user_id: int) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
+# ===== Tastiere =====
 def _kb_main() -> InlineKeyboardMarkup:
+    # Prima riga: 📖 Menù (refresh/mostra main)
+    # Poi 2 righe con le sezioni (2 bottoni per riga)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇪🇸 Shiip-Spagna", callback_data="page:shipspagna")],
-        [InlineKeyboardButton("🎇 Recensioni",    callback_data="page:recensioni")],
-        [InlineKeyboardButton("📲 Info-Contatti", callback_data="page:infocontatti")],
+        [InlineKeyboardButton("📖 Menù", callback_data="page:main")],
+        [
+            InlineKeyboardButton("🇪🇸 Shiip-Spagna", callback_data="page:shipspagna"),
+            InlineKeyboardButton("🎇 Recensioni",    callback_data="page:recensioni"),
+        ],
+        [
+            InlineKeyboardButton("📲 Info-Contatti",  callback_data="page:infocontatti"),
+            InlineKeyboardButton("📍🇮🇹 Point Attivi", callback_data="page:pointattivi"),
+        ],
     ])
 
 def _kb_back() -> InlineKeyboardMarkup:
+    # In ogni sezione mostriamo sia 🔙 Back che 📖 Menù
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Back", callback_data="page:main")]
+        [
+            InlineKeyboardButton("🔙 Back",  callback_data="page:main"),
+            InlineKeyboardButton("📖 Menù",  callback_data="page:main"),
+        ]
     ])
 
 def _chunk_text(text: str, limit: int = 3900):
-    # Telegram consente 4096 caratteri; lasciamo margine
     if len(text) <= limit:
         return [text]
-    parts = []
-    cur = []
-    cur_len = 0
+    parts, cur, cur_len = [], [], 0
     for line in text.splitlines(True):
         if cur_len + len(line) > limit:
-            parts.append("".join(cur))
-            cur = [line]
-            cur_len = len(line)
+            parts.append("".join(cur)); cur, cur_len = [line], len(line)
         else:
-            cur.append(line)
-            cur_len += len(line)
-    if cur:
-        parts.append("".join(cur))
+            cur.append(line); cur_len += len(line)
+    if cur: parts.append("".join(cur))
     return parts
 
 async def _render_page_message(update: Update, context: ContextTypes.DEFAULT_TYPE, page_key: str, edit_target=None):
-    """Mostra la pagina; se lunga, la spezza in più messaggi.
-       Se edit_target è presente e c'è un solo chunk, prova l'edit.
-    """
     text = PAGES.get(page_key, "Pagina non trovata.")
     chunks = _chunk_text(text)
     kb = _kb_main() if page_key == "main" else _kb_back()
 
+    # Se possiamo, editiamo il messaggio del bottone; se è una foto/caption, fallirà e andremo in fallback
     if edit_target and len(chunks) == 1:
         try:
             await edit_target.edit_text(
@@ -231,6 +208,7 @@ async def _render_page_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
+    # Invia i chunk (tastiera solo sull'ultimo)
     for i, part in enumerate(chunks, start=1):
         if i < len(chunks):
             await update.effective_chat.send_message(part, parse_mode="Markdown", disable_web_page_preview=True)
@@ -243,55 +221,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         add_user(user.id, user.username, user.first_name, user.last_name)
 
-    # Foto di benvenuto
+    # Unico messaggio: foto + caption + tastiera con 📖 Menù + sezioni
     try:
         await update.message.reply_photo(
             photo=PHOTO_URL,
-            caption="🏆 Benvenuto nel bot ufficiale di BPFARM!\n⚡ Serietà e rispetto sono la nostra identità.\n💪 Qui si cresce con impegno e determinazione.",
+            caption=CAPTION_MAIN,
+            reply_markup=_kb_main(),
+            parse_mode="Markdown",
         )
     except Exception:
-        pass
-
-    await _render_page_message(update, context, "main")
+        # fallback: solo testo + bottoni
+        await update.effective_chat.send_message(
+            CAPTION_MAIN, reply_markup=_kb_main(), parse_mode="Markdown", disable_web_page_preview=True
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Comandi disponibili:\n"
-        "/start – Benvenuto + menu interno\n"
-        "/help – Questo aiuto\n"
-        "/ping – Test rapido\n"
-        "/utenti – Numero utenti registrati\n"
-        "/ultimo_backup – Invia l’ultimo file di backup\n"
-        "/status – Stato del bot (versione/ora/prossimo backup/utenti)\n"
-        "\n"
-        "Solo Admin:\n"
-        "/backup – Backup manuale\n"
-        "/test_backup – Esegue ora il job di backup\n"
-        "/list – Elenco utenti\n"
-        "/export – CSV utenti\n"
-        "/broadcast <testo> – Messaggio a tutti"
+        "/start – Foto + bottoni (📖 Menù, sezioni)\n"
+        "/ping – Test\n"
+        "/utenti – Numero utenti\n"
+        "/status – Stato bot\n"
+        "/ultimo_backup – Invia ultimo backup\n\n"
+        "Admin: /backup /test_backup /list /export /broadcast"
     )
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏓 Pong! Il bot è attivo.")
+    await update.message.reply_text("🏓 Pong!")
 
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👥 Utenti registrati: {count_users()}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now_utc = datetime.now(timezone.utc)
-    next_bu = _next_backup_utc()
+    now = datetime.now(timezone.utc)
+    nxt = _next_backup_utc()
     last = _last_backup_file()
-    last_line = f"📦 Ultimo backup: {last.name}" if last else "📦 Ultimo backup: nessuno"
-    await update.message.reply_text(
-        "🔎 **Stato bot**\n"
+    msg = (
+        f"🔎 **Stato bot**\n"
         f"• Versione: {VERSION}\n"
-        f"• Ora server (UTC): {now_utc:%Y-%m-%d %H:%M:%S}\n"
-        f"• Prossimo backup (UTC): {next_bu:%Y-%m-%d %H:%M}\n"
-        f"• Utenti registrati: {count_users()}\n"
-        f"{last_line}",
-        disable_web_page_preview=True,
+        f"• Ora (UTC): {now:%Y-%m-%d %H:%M}\n"
+        f"• Prossimo backup: {nxt:%Y-%m-%d %H:%M}\n"
+        f"• Utenti: {count_users()}\n"
+        f"• Ultimo backup: {last.name if last else 'nessuno'}"
     )
+    await update.message.reply_text(msg, disable_web_page_preview=True)
 
 # ===== BACKUP =====
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
@@ -304,7 +276,7 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
         if ADMIN_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"✅ Backup giornaliero completato.\n🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n📦 {backup_path.name}",
+                text=f"✅ Backup giornaliero completato.\n🕒 {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S UTC}\n📦 {backup_path.name}",
             )
     except Exception as e:
         logger.exception("Errore nel backup automatico")
@@ -321,12 +293,11 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         backup_path = Path(BACKUP_DIR) / f"manual_backup_{ts}.db"
         shutil.copy2(DB_FILE, backup_path)
         await update.message.reply_document(InputFile(str(backup_path)), caption="💾 Backup manuale completato.")
-        logger.info(f"💾 Backup manuale eseguito: {backup_path}")
     except Exception as e:
         logger.exception("Errore backup manuale")
         await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
 
-async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ultimo_backup(update: Update, Context: ContextTypes.DEFAULT_TYPE):
     p = Path(BACKUP_DIR)
     if not p.exists():
         await update.message.reply_text("Nessun backup trovato.")
@@ -344,7 +315,7 @@ async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("⏳ Avvio backup di test…")
     await backup_job(context)
-    await update.message.reply_text("✅ Test completato. Controlla messaggio all’admin e cartella backup.")
+    await update.message.reply_text("✅ Test completato.")
 
 # ===== ADMIN: LIST / EXPORT / BROADCAST =====
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,8 +332,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uname = f"@{u['username']}" if u['username'] else "-"
         line = f"{i}. {uname} ({u['user_id']})\n"
         if len(chunk) + len(line) > 3500:
-            await update.message.reply_text(chunk)
-            chunk = ""
+            await update.message.reply_text(chunk); chunk = ""
         chunk += line
     if chunk:
         await update.message.reply_text(chunk)
@@ -386,22 +356,17 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Solo l’amministratore può eseguire questa operazione.")
         return
-
     text = " ".join(context.args).strip() if context.args else ""
     if not text and update.message and update.message.reply_to_message:
         text = (update.message.reply_to_message.text or "").strip()
-
     if not text:
         await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast")
         return
-
     users = get_all_users()
     if not users:
         await update.message.reply_text("❕ Nessun utente a cui inviare.")
         return
-
-    ok = 0
-    fail = 0
+    ok = fail = 0
     await update.message.reply_text(f"📣 Invio a {len(users)} utenti…")
     for u in users:
         try:
@@ -411,7 +376,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             fail += 1
             await aio.sleep(0.05)
-
     await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}")
 
 # ===== WEBHOOK GUARD =====
@@ -419,9 +383,9 @@ async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await context.bot.get_webhook_info()
         if info and info.url:
-            logger.warning(f"🛡️ Webhook inatteso rilevato: {info.url} — lo rimuovo.")
+            logger.warning(f"🛡️ Webhook inatteso: {info.url} — rimuovo.")
             await context.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🛡️ Webhook rimosso dal guardiano.")
+            logger.info("🛡️ Webhook rimosso.")
     except Exception as e:
         logger.debug(f"Guardiano webhook: {e}")
 
@@ -430,17 +394,17 @@ def anti_conflict_prepare(app):
     loop = aio.get_event_loop()
     loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     logger.info("🔧 Webhook rimosso + pending updates droppati.")
-    for i in range(6):
+    for i in range(6):  # ~1 minuto max
         try:
             loop.run_until_complete(app.bot.get_updates(timeout=1))
             logger.info("✅ Slot di polling acquisito.")
             return
         except tgerr.Conflict as e:
             wait = 10
-            logger.warning(f"⚠️ Conflict (tentativo {i+1}/6): {e}. Riprovo tra {wait}s…")
+            logger.warning(f"⚠️ Conflict ({i+1}/6): {e}. Riprovo tra {wait}s…")
             loop.run_until_complete(aio.sleep(wait))
         except Exception as e:
-            logger.warning(f"ℹ️ Attendo e riprovo get_updates… ({e})")
+            logger.warning(f"ℹ️ Retry get_updates… ({e})")
             loop.run_until_complete(aio.sleep(3))
 
 # ===== CALLBACK: NAVIGAZIONE MENU =====
@@ -462,10 +426,9 @@ def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Anti-conflict all'avvio
     anti_conflict_prepare(app)
 
-    # Comandi
+    # Comandi base
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ping", ping))
@@ -480,29 +443,16 @@ def main():
     app.add_handler(CommandHandler("export", export_users))
     app.add_handler(CommandHandler("broadcast", broadcast))
 
-    # Navigazione menu (callback)
+    # Callback menu
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    # Guardiano ogni 10 minuti
+    # Guardiano webhook + backup giornaliero
     app.job_queue.run_repeating(webhook_guard, interval=600, first=60, name="webhook_guard")
-
-    # Backup giornaliero (ora server UTC)
     hhmm = _parse_backup_time(BACKUP_TIME)
     app.job_queue.run_daily(backup_job, time=hhmm, days=(0,1,2,3,4,5,6), name="daily_db_backup")
-    logger.info("🕒 Backup giornaliero pianificato (timezone server).")
 
-    # Avvio con retry anti-conflict
-    while True:
-        try:
-            logger.info("🚀 Bot avviato (polling).")
-            app.run_polling(allowed_updates=Update.ALL_TYPES)
-            break
-        except tgerr.Conflict as e:
-            logger.warning(f"⚠️ Conflict durante il polling: {e}. Pulisco webhook e riavvio tra 15s…")
-            loop = aio.get_event_loop()
-            loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
-            pytime.sleep(15)
-            continue
+    logger.info("🚀 Bot avviato.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
