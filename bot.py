@@ -1,29 +1,35 @@
 # =====================================================
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
-# UI: 5 bottoni in home | Pannello unico edit-in-place
-# 📲 Info-Contatti: invia immagine + sotto-menù (📇 Contatti | ℹ️ Info)
-# Admin ultra-blindati + Backup automatico + Anti-conflict + Webhook guard
-# Versione: 3.1-info-contacts-image
+# UI: 5 bottoni in home (📖 Menù + 4 sezioni) | Sezioni: 🔙 Back
+# Un SOLO messaggio pannello (edit in-place, nessun duplicato)
+# ULTRA-BLINDATO:
+#  - Solo ADMIN vede/usa: /status /backup /ultimo_backup /test_backup /list /export /broadcast /utenti
+#  - Non-admin: silenzio sui comandi sensibili + notifica all'ADMIN
+# Extra: Sezione 📲 Info & Contatti con:
+#        - 📇 Contatti => immagine + testo + bottoni URL
+#        - ℹ️ Info => Delivery / Meet-Up / Point
 # =====================================================
 
 import os
-import sqlite3
-import logging
-import shutil
-import asyncio as aio
-import csv
 import json
+import csv
+import shutil
+import logging
+import sqlite3
+import asyncio as aio
 from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
 import telegram.error as tgerr
 
-VERSION = "3.1-info-contacts-image"
+VERSION = "3.0-info-contacts"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -36,7 +42,7 @@ logger = logging.getLogger("bpfarm-bot")
 BOT_TOKEN   = os.environ.get("BOT_TOKEN")
 DB_FILE     = os.environ.get("DB_FILE", "./data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "./backup")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC (Render)
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC su Render
 
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
@@ -50,10 +56,7 @@ CAPTION_MAIN = os.environ.get(
     "🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n⚡ Serietà e rispetto sono la nostra identità.\n💪 Qui si cresce con impegno e determinazione."
 ).replace("\\n", "\n")
 
-# Immagine specifica per la sezione Info & Contatti (usa link pubblico alla grafica BPFAM oro/nero)
-INFO_CONTACTS_IMAGE_URL = os.environ.get("INFO_CONTACTS_IMAGE_URL", PHOTO_URL)
-
-# ===== UTILITY TESTI (ENV) =====
+# ===== HELPER TESTI =====
 def _normalize_env_text(v: str | None, default: str) -> str:
     if v is None:
         return default
@@ -66,126 +69,45 @@ def _normalize_env_text(v: str | None, default: str) -> str:
             logger.warning(f"Errore lettura {v}: {e}")
     return v
 
+# ===== PAGINE PRINCIPALI =====
 def _load_pages_from_env():
     return {
         "main":         _normalize_env_text(os.environ.get("PAGE_MAIN"), ""),
-        "menu":         _normalize_env_text(os.environ.get("PAGE_MENU"), "📖 *Menù*\n\nScrivi qui il tuo menù completo."),
-        "shipspagna":   _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"), "🇪🇸 *Shiip-Spagna*\n\nInfo e regole spedizioni."),
-        "recensioni":   _normalize_env_text(os.environ.get("PAGE_RECENSIONI"), "🎇 *Recensioni*\n\n⭐️ “Ottimo servizio!”"),
-        "infocontatti": _normalize_env_text(os.environ.get("PAGE_INFO"), "📲 *Info & Contatti*\nScegli una sezione:"),
-        "pointattivi":  _normalize_env_text(os.environ.get("PAGE_POINTATTIVI"), "📍🇮🇹 *Point Attivi*\n\n• Roma\n• Milano"),
+        "menu":         _normalize_env_text(os.environ.get("PAGE_MENU"),
+                         "📖 *Menù*\n\nScrivi qui il tuo menù completo."),
+        "shipspagna":   _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"),
+                         "🇪🇸 *Shiip-Spagna*\n\nInfo e regole spedizioni."),
+        "recensioni":   _normalize_env_text(os.environ.get("PAGE_RECENSIONI"),
+                         "🎇 *Recensioni*\n\n⭐️ “Ottimo servizio!”"),
+        "infocontatti": _normalize_env_text(os.environ.get("PAGE_INFO"),
+                         "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"),
+        "pointattivi":  _normalize_env_text(os.environ.get("PAGE_POINTATTIVI"),
+                         "📍🇮🇹 *Point Attivi*\n\n• Roma\n• Milano"),
 
-        # Sezioni INFO
+        # Sottopagine INFO
         "info_overview": _normalize_env_text(os.environ.get("PAGE_INFO_OVERVIEW"),
-            "ℹ️ *Info — Centro informativo BPFAM*\n\nSeleziona una voce: Delivery, Meet-Up o Point."
-        ),
-
-        "info_delivery": _normalize_env_text(os.environ.get("PAGE_INFO_DELIVERY"),
-            "🧾 *REGOLAMENTO DELIVERY — BPFARM OFFICIAL*\n\n"
-            "1️⃣ ✅ Verifica dell’identità obbligatoria per ogni consegna, a meno che tu non sia già registrato nel sistema clienti.\n\n"
-            "2️⃣ 🚗 Solo una persona può ricevere l’ordine. Se il rider nota più persone o situazioni non conformi, la consegna sarà annullata immediatamente.\n\n"
-            "3️⃣ ⏰ Gli orari concordati sono vincolanti. Ogni modifica va comunicata con almeno 1 ora di anticipo e motivazione valida.\n\n"
-            "4️⃣ ❌ Chi non si presenta, annulla all’ultimo momento o crea problemi durante la consegna verrà bannato definitivamente dai nostri canali e servizi BPFAM.\n\n"
-            "© 2025 BPFAM Official — Consegne sicure, riservate e blindate.\n\n"
-            "🚗 *SERVIZIO DELIVERY — BPFAM OFFICIAL*\n\n"
-            "🏡 Il Delivery BPFAM ti permette di ricevere i tuoi ordini comodamente a casa o nel punto concordato, sempre con la massima riservatezza e puntualità. "
-            "⚡ Serietà, rispetto e fiducia sono i principi che guidano ogni consegna.\n\n"
-            "💸 Il servizio prevede un piccolo costo aggiuntivo, stabilito in base alla distanza e alla quantità dell’ordine. Tutte le informazioni vengono comunicate in privato dal nostro staff ufficiale.\n\n"
-            "✅ Dopo la verifica dell’identità e la conferma dell’ordine, verrà organizzata la consegna con data, orario e luogo precisi. "
-            "❗In caso di ritardi o mancata presenza senza avviso, il servizio verrà sospeso.\n\n"
-            "© 2025 BPFAM Official — Serietà, rispetto e fiducia."
-        ),
-
-        "info_meetup": _normalize_env_text(os.environ.get("PAGE_INFO_MEETUP"),
-            "🧾 *REGOLAMENTO MEET-UP — BPFAM OFFICIAL*\n\n"
-            "📌 Professionalità, rispetto e organizzazione sono la base di ogni incontro.\n\n"
-            "1️⃣ ✅ Verifica dell’identità obbligatoria prima di qualsiasi incontro, a meno che tu non sia già registrato nel sistema clienti BPFAM.\n\n"
-            "2️⃣ 🤝 Massimo 2 persone per appuntamento. Chi accompagna dovrà essere segnalato in anticipo per la verifica di sicurezza.\n\n"
-            "3️⃣ 🕒 Orari e luoghi fissati non possono essere modificati, salvo comunicazione con almeno 6 ore di preavviso e motivo valido.\n\n"
-            "4️⃣ ❌ Chi non si presenta o annulla all’ultimo momento senza giustificazione potrà essere escluso da futuri servizi o punti BPFAM.\n\n"
-            "5️⃣ ⚡ Ogni incontro è riservato e gestito esclusivamente dallo staff autorizzato BPFAM. Serietà, puntualità e rispetto sono fondamentali.\n\n"
-            "© 2025 BPFAM Official — Serietà, rispetto e fiducia.\n\n"
-            "🏆 *SERVIZI MEET-UP — BPFAM OFFICIAL*\n\n"
-            "🤝 Il Meet-Up è un servizio esclusivo che ti permette di ritirare i tuoi ordini di persona in zone selezionate dal nostro team o dai nostri point ufficiali. "
-            "⚡ Serietà e rispetto sono alla base di ogni incontro: organizziamo solo con chi mostra impegno e affidabilità.\n\n"
-            "📅 Dopo la verifica dell’identità e la conferma dell’ordine, verrà fissato un appuntamento con data, orario e luogo precisi per il ritiro. "
-            "❗ La puntualità è obbligatoria: eventuali ritardi o assenze non giustificate comporteranno l’esclusione dai nostri servizi.\n\n"
-            "📜 Tutte le comunicazioni ufficiali e i dettagli dell’incontro vengono gestiti direttamente tramite il nostro staff BPFAM.\n\n"
-            "© 2025 BPFAM Official — Serietà, rispetto e fiducia."
-        ),
-
-        "info_point": _normalize_env_text(os.environ.get("PAGE_INFO_POINT"),
-            "🌐 *BPFAM OFFICIAL POINT* 🌐\n📍\n\n"
-            "👁‍🗨 *ENTRA NEL MONDO BPFAM*\n"
-            "Siamo alla ricerca di persone affidabili e motivate che vogliano rappresentare il nostro nome in nuove città e regioni 🏙\n\n"
-            "🎯 Il nostro obiettivo è creare una rete solida, sicura e coordinata di referenti BPFAM, mantenendo sempre gli stessi standard di serietà, rispetto e professionalità.\n\n"
-            "📋 *REQUISITI ESSENZIALI:*\n"
-            "• Responsabilità e discrezione 🔒\n• Conoscenza base del settore 🌿\n• Capacità organizzativa e puntualità ⏱\n• Comunicazione chiara e rispetto delle regole 📑\n\n"
-            "💰 È richiesto un capitale iniziale minimo (15.000 – 20.000 €), necessario per garantire serietà, autonomia e una gestione professionale del proprio Point 🔒\n\n"
-            "🧭 Durante la selezione verranno valutati metodo, esperienza e attitudine al lavoro, fornendo supporto e linee guida per una collaborazione stabile e duratura ✅\n\n"
-            "⸻\n\n"
-            "🚩 *BPFAM POINT ITALIA* 🇮🇹\n📍\n\n"
-            "✅ Supera la selezione e diventa un BPFAM POINT ufficiale. Entrerai a far parte di una rete esclusiva, con accesso a strumenti dedicati e vantaggi riservati ai nostri affiliati 🔥\n\n"
-            "🤖💻 Ogni Point avrà un bot Telegram personalizzato, gestito dal nostro team tecnico e sincronizzato con il database centrale BPFAM, per offrire ai propri clienti un servizio moderno, rapido e sicuro.\n\n"
-            "📦 *PRIORITÀ E VANTAGGI ESCLUSIVI:* I Point BPFAM beneficiano di sconti riservati sul materiale, condizioni privilegiate e fornitura garantita anche nei periodi di scarsità. Il magazzino centrale BPFAM assicura sempre continuità e stabilità costante 💎\n\n"
-            "🔒 *VERIFICA, CREDIBILITÀ E PARTNERSHIP:* Tutti i nostri Point vengono riconosciuti e inseriti all’interno dei nostri sponsor e partner ufficiali BPFAM, con certificazione verificata e approvazione diretta. Ogni affiliato gode della copertura del marchio BPFAM, simbolo di serietà, sicurezza e affidabilità nel settore.\n\n"
-            "🤝 *ASSISTENZA DIRETTA E CONTINUA:* Il nostro servizio di supporto è attivo 24 ore su 24, 7 giorni su 7, con personale qualificato sempre disponibile per assistenza tecnica o gestionale. Il contatto diretto con il team centrale BPFAM garantisce efficienza, supporto e trasparenza costante 💬\n\n"
-            "🏆 *SELEZIONE E STANDARD DI QUALITÀ:* BPFAM seleziona esclusivamente profili che rispecchiano la propria filosofia e i propri standard elevati. Solo chi dimostra affidabilità, competenza e dedizione potrà rappresentare ufficialmente il marchio BPFAM.\n\n"
-            "📩 Contattaci su Telegram per ricevere maggiori informazioni e scopri come entrare nella rete BPFAM POINT ITALIA 🚀\n\n"
-            "⸻\n\n"
-            "📍 *COSA SONO I BPFAM POINT?* 👤\n\n"
-            "I BPFAM Point sono punti ufficiali autorizzati, presenti in varie città e regioni d’Italia 🇮🇹. Rappresentano il canale diretto per accedere ai servizi e prodotti BPFAM, con la garanzia di qualità, riservatezza e professionalità.\n\n"
-            "Ogni Point opera in autonomia, ma seguendo gli standard e le linee guida ufficiali BPFAM, per assicurare un’esperienza coerente, sicura e affidabile 📋\n\n"
-            "💰 I prezzi possono variare in base alla zona e alla gestione locale del Point. Si invita a rivolgersi solo ai canali ufficiali, evitando intermediari non verificati ✅\n\n"
-            "📌 BPFAM supervisiona direttamente i Point principali, garantendo serietà, trasparenza e continuità del servizio.\n\n"
-            "⸻\n\n"
-            "© 2025 — Powered by BPFAM Official Network | Management Division 💎"
-        ),
+                          "ℹ️ *Info — Centro informativo BPFAM*\n\nSeleziona una voce: Delivery, Meet-Up o Point."),
+        "info_delivery": _normalize_env_text(os.environ.get("PAGE_INFO_DELIVERY"), "—"),
+        "info_meetup":   _normalize_env_text(os.environ.get("PAGE_INFO_MEETUP"), "—"),
+        "info_point":    _normalize_env_text(os.environ.get("PAGE_INFO_POINT"), "—"),
     }
 
 PAGES = _load_pages_from_env()
 
-# ===== CONTATTI (da ENV JSON oppure default) =====
-def _load_contacts():
-    raw = os.environ.get("CONTACT_LINKS_JSON", "").strip()
-    if raw:
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
-                return data
-        except Exception as e:
-            logger.warning(f"CONTACT_LINKS_JSON invalido: {e}")
-    # Default: i tuoi contatti
-    return {
-        "Instagram Principale 📲": "https://www.instagram.com/bpfamofficial?igsh=MXM4YmljZmE1b2Uweg==",
-        "Instagram Backup 📲": "https://www.instagram.com/bpfamofficial420backup?igsh=YTQxdzVpdTE5MGd2",
-        "Instagram Media 🎥": "https://www.instagram.com/bpfam_official420media?igsh=ZjgzcnJvazg1c2dq&utm_source=qr",
-        "Contatto Telegram 💬": "https://t.me/contattobpfam",
-        "Canale Telegram Ufficiale 📢": "https://t.me/+CIA2nWh5thE2ZWFk",
-        "Bot Telegram Ufficiale 🤖": "https://t.me/Bpfarmbot",
-        "Contatto Potato 🥔": "https://ptwdym158.org/joinchat/B2iAXRTlpC5_5Awy9UugrQ",
-    }
+# ===== INFO & CONTATTI (ENV) =====
+INFO_CONTACTS_IMAGE_URL = os.environ.get("INFO_CONTACTS_IMAGE_URL", "")
+CONTACTS_TEXT = (os.environ.get("PAGE_CONTACTS_TEXT")
+                 or "💎 *BPFAM CONTATTI UFFICIALI* 💎").replace("\\n", "\n")
 
-CONTACT_LINKS = _load_contacts()
+def _load_contact_links():
+    raw = os.environ.get("CONTACT_LINKS_JSON", "{}")
+    try:
+        return json.loads(raw)
+    except Exception:
+        logger.warning("CONTACT_LINKS_JSON non valido: uso lista vuota")
+        return {}
 
-CONTACTS_TEXT = _normalize_env_text(os.environ.get("PAGE_CONTACTS_TEXT"), 
-    "💎 *BPFAM CONTATTI UFFICIALI* 💎\n\n"
-    "📍 Resta connesso solo attraverso i canali verificati BPFAM.\n"
-    "Tutti i contatti elencati qui sotto sono ufficiali e riconosciuti dal network BPFAM.\n\n"
-    "⸻\n\n"
-    "🔴 *INSTAGRAM PRINCIPALE 📲*\n👉 @bpfamofficial\n\n"
-    "🟠 *INSTAGRAM BACKUP 📲*\n👉 @bpfamofficial420backup\n\n"
-    "🟣 *INSTAGRAM MEDIA 🎥*\n👉 @bpfam_official420media\n\n"
-    "💬 *CONTATTO TELEGRAM 📲*\n👉 @contattobpfam\n\n"
-    "📢 *CANALE TELEGRAM UFFICIALE 📲*\n👉 t.me/+CIA2nWh5thE2ZWFk\n\n"
-    "👾 *BOT TELEGRAM UFFICIALE 🤖*\n👉 @Bpfarmbot\n\n"
-    "🥔 *CONTATTO POTATO 📲*\n👉 Apri link\n\n"
-    "⸻\n\n"
-    "⚠️ Diffida da profili o canali non presenti in questo elenco.\n"
-    "Solo i contatti elencati sono verificati e gestiti direttamente da BPFAM Official Network.\n\n"
-    "⸻\n\n"
-    "© 2025 — Powered by BPFAM Official Network | Management Division 💎"
-)
+CONTACT_LINKS = _load_contact_links()
 
 # ===== DATABASE =====
 def init_db():
@@ -248,7 +170,7 @@ async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: s
     except Exception:
         pass
 
-# ===== UI / NAVIGAZIONE =====
+# ===== KEYBOARDS =====
 def _kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Menù",            callback_data="sec:menu")],
@@ -265,28 +187,36 @@ def _kb_home() -> InlineKeyboardMarkup:
 def _kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
 
-def _kb_infocontatti_root() -> InlineKeyboardMarkup:
+def _kb_info_root() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📇 Contatti", callback_data="contacts:open"),
-            InlineKeyboardButton("ℹ️ Info",     callback_data="info:root"),
+            InlineKeyboardButton("🗂️ Contatti", callback_data="info:contacts"),
+            InlineKeyboardButton("ℹ️ Info",     callback_data="info:overview"),
         ],
         [InlineKeyboardButton("🔙 Back", callback_data="home")],
     ])
 
 def _kb_contacts() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(label, url=url)] for label, url in CONTACT_LINKS.items()]
-    rows.append([InlineKeyboardButton("🔙 Indietro", callback_data="sec:infocontatti")])
+    rows, row = [], []
+    for label, url in CONTACT_LINKS.items():
+        row.append(InlineKeyboardButton(label, url=url))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")])
     return InlineKeyboardMarkup(rows)
 
-def _kb_info_root() -> InlineKeyboardMarkup:
+def _kb_info_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚚 Info Delivery", callback_data="info:delivery")],
-        [InlineKeyboardButton("🤝 Info Meet-Up",  callback_data="info:meetup")],
+        [
+            InlineKeyboardButton("🚚 Info Delivery", callback_data="info:delivery"),
+            InlineKeyboardButton("🤝 Info Meet-Up",  callback_data="info:meetup"),
+        ],
         [InlineKeyboardButton("📍🇮🇹 Info Point", callback_data="info:point")],
-        [InlineKeyboardButton("🔙 Indietro",      callback_data="sec:infocontatti")],
+        [InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")],
     ])
 
+# ===== PANEL MGMT =====
 PANEL_KEY = "panel_msg_id"
 
 async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineKeyboardMarkup):
@@ -302,6 +232,7 @@ async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineK
 async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     existing_id = context.user_data.get(PANEL_KEY)
+
     text = PAGES["main"] or "\u2063"
     kb = _kb_home()
 
@@ -324,10 +255,15 @@ async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat_id, text=text, reply_markup=kb,
         parse_mode="Markdown", disable_web_page_preview=True
     )
+    if existing_id and existing_id != sent.message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=existing_id)
+        except Exception:
+            pass
     context.user_data[PANEL_KEY] = sent.message_id
     return chat_id, sent.message_id
 
-# ===== HANDLERS UTENTE =====
+# ===== HANDLERS PUBBLICI =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
@@ -346,49 +282,61 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = q.message.chat_id
     panel_id = q.message.message_id
-    context.user_data[PANEL_KEY] = panel_id
+    context.user_data[PANEL_KEY] = panel_id  # usa SEMPRE il messaggio del click
 
     data = q.data or ""
     if data == "home":
-        await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home())
+        return
 
+    # Pagina: Info & Contatti (2 bottoni)
+    if data == "sec:infocontatti":
+        text = PAGES.get("infocontatti") or "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"
+        await _edit_panel(context, chat_id, panel_id, text, _kb_info_root())
+        return
+
+    # Sezioni standard
     if data.startswith("sec:"):
         key = data.split(":", 1)[1]
-        if key == "infocontatti":
-            # Invia l'immagine in stile Packz (foto sopra al pannello)
-            try:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=INFO_CONTACTS_IMAGE_URL,
-                    caption="*BPFAM OFFICIAL NETWORK*\n*INFO & CONTATTI*\n\nRimani connesso ai canali ufficiali BPFAM.",
-                    parse_mode="Markdown",
-                )
-            except Exception as e:
-                logger.warning(f"Errore invio immagine Info&Contatti: {e}")
-            # Pannello con due cartelle
-            text = PAGES.get("infocontatti", "📲 *Info & Contatti*\nScegli una sezione:")
-            await _edit_panel(context, chat_id, panel_id, text, _kb_infocontatti_root()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back())
+        return
 
-        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back()); return
+    # ===== Sotto-sezioni INFO & CONTATTI =====
+    # 📇 Contatti: immagine + testo + bottoni URL
+    if data == "info:contacts":
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=INFO_CONTACTS_IMAGE_URL or "https://i.imgur.com/404.png",
+                caption=CONTACTS_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+                reply_markup=_kb_contacts(),
+            )
+        except Exception:
+            await _edit_panel(context, chat_id, panel_id, CONTACTS_TEXT, _kb_contacts())
+        return
 
-    # Sotto-menù: Contatti
-    if data == "contacts:open":
-        await _edit_panel(context, chat_id, panel_id, CONTACTS_TEXT, _kb_contacts()); return
+    # ℹ️ Info: menu
+    if data == "info:overview":
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_overview", "—"), _kb_info_menu())
+        return
 
-    # Sotto-menù: Info
-    if data == "info:root":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_overview"), _kb_info_root()); return
+    # ℹ️ Info: 3 pagine
     if data == "info:delivery":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_delivery"), _kb_info_root()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_delivery", "—"), _kb_info_menu())
+        return
     if data == "info:meetup":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_meetup"), _kb_info_root()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_meetup", "—"), _kb_info_menu())
+        return
     if data == "info:point":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_point"), _kb_info_root()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_point", "—"), _kb_info_menu())
+        return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong!")
 
-# ===== COMANDI ADMIN (silenzio ai non-admin) =====
+# ===== COMANDI ADMIN =====
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
@@ -397,8 +345,7 @@ async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _parse_backup_time(hhmm: str) -> dtime:
     try:
         h, m = map(int, hhmm.split(":")); return dtime(hour=h, minute=m)
-    except:
-        return dtime(hour=3, minute=0)
+    except: return dtime(hour=3, minute=0)
 
 def _next_backup_utc() -> datetime:
     run_t = _parse_backup_time(BACKUP_TIME)
@@ -529,7 +476,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await aio.sleep(0.05)
     await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}")
 
-# ===== /help =====
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_admin(update.effective_user.id):
         txt = (
@@ -538,7 +484,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/ping – Test rapido\n"
             "\n"
             "Solo Admin:\n"
-            "/status, /utenti, /backup, /ultimo_backup, /test_backup, /list, /export, /broadcast"
+            "/status – Stato bot\n"
+            "/utenti – Numero utenti\n"
+            "/backup – Backup manuale\n"
+            "/ultimo_backup – Invia l’ultimo file di backup\n"
+            "/test_backup – Esegue job di backup\n"
+            "/list – Elenco utenti\n"
+            "/export – CSV utenti\n"
+            "/broadcast <testo> – Messaggio a tutti"
         )
     else:
         txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
@@ -597,15 +550,20 @@ def main():
     # /help
     app.add_handler(CommandHandler("help", help_command))
 
-    # Ignora comandi non gestiti per utenti normali
+    # Ignora qualsiasi altro comando degli utenti normali
     app.add_handler(MessageHandler(filters.COMMAND, lambda u, c: None))
 
     # Job: webhook guard + backup giornaliero
     app.job_queue.run_repeating(webhook_guard, interval=600, first=60, name="webhook_guard")
-    hhmm = _parse_backup_time(BACKUP_TIME)
-    app.job_queue.run_daily(backup_job, time=hhmm, name="backup_daily")
+    # backup giornaliero
+    try:
+        hh, mm = map(int, BACKUP_TIME.split(":"))
+    except Exception:
+        hh, mm = 3, 0
+    app.job_queue.run_daily(backup_job, time=dtime(hour=hh, minute=mm, tzinfo=timezone.utc), name="daily_backup")
 
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info(f"🚀 Avvio bot v{VERSION}")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
