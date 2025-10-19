@@ -2,9 +2,10 @@
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
 # UI: 5 bottoni in home (📖 Menù + 4 sezioni) | Sezioni: 🔙 Back
 # Un SOLO messaggio pannello (edit in-place, nessun duplicato)
-# ULTRA-BLINDATO:
+# ULTRA-BLINDATO + ANTI-INOLTRO:
 #  - Solo ADMIN vede/usa: /status /backup /ultimo_backup /test_backup /list /export /broadcast /utenti
 #  - Non-admin: silenzio sui comandi sensibili + notifica all'ADMIN
+#  - Anti-inoltro: protect_content=True su foto start e pannello
 # Fix: CAPTION_MAIN supporta \n | PAGE_MAIN può essere vuoto
 # =====================================================
 
@@ -24,7 +25,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "2.9-ultra-locked-single-panel"
+VERSION = "3.0-ultra-locked-anti-forward"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -134,6 +135,7 @@ async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: s
             ),
             parse_mode="Markdown",
             disable_web_page_preview=True,
+            protect_content=True,  # anche la notifica è non inoltrabile
         )
     except Exception:
         pass
@@ -158,6 +160,7 @@ def _kb_back() -> InlineKeyboardMarkup:
 PANEL_KEY = "panel_msg_id"
 
 async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineKeyboardMarkup):
+    # NB: edit_message_* NON ha protect_content; resta quello del messaggio originale.
     await context.bot.edit_message_text(
         chat_id=chat_id,
         message_id=msg_id,
@@ -190,9 +193,14 @@ async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except tgerr.BadRequest:
             pass  # non esiste più: creeremo un nuovo pannello
 
+    # 👉 Qui proteggiamo il pannello dall'inoltro
     sent = await context.bot.send_message(
-        chat_id=chat_id, text=text, reply_markup=kb,
-        parse_mode="Markdown", disable_web_page_preview=True
+        chat_id=chat_id,
+        text=text,
+        reply_markup=kb,
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+        protect_content=True,  # 🔒 blocca inoltro/copia del pannello
     )
     if existing_id and existing_id != sent.message_id:
         try:
@@ -207,13 +215,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
         add_user(user.id, user.username, user.first_name, user.last_name)
+    # Foto + caption protetta da inoltro
     try:
-        await update.message.reply_photo(photo=PHOTO_URL, caption=CAPTION_MAIN, parse_mode="Markdown")
+        await update.message.reply_photo(
+            photo=PHOTO_URL,
+            caption=CAPTION_MAIN,
+            parse_mode="Markdown",
+            protect_content=True,  # 🔒 blocca inoltro/copia della foto
+        )
     except Exception as e:
         logger.warning(f"Errore invio foto: {e}")
     await _ensure_panel(update, context)
 
-# *** IMPORTANTE: usa SEMPRE il messaggio del click come pannello ***
+# Usa SEMPRE il messaggio del click come pannello (no duplicati)
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
@@ -235,13 +249,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏓 Pong!")
+    await update.message.reply_text("🏓 Pong!", protect_content=True)
 
 # ===== COMANDI ADMIN (silenzio ai non-admin) =====
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
-    await update.message.reply_text(f"👥 Utenti registrati: {count_users()}")
+    await update.message.reply_text(f"👥 Utenti registrati: {count_users()}", protect_content=True)
 
 def _parse_backup_time(hhmm: str) -> dtime:
     try:
@@ -275,6 +289,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Utenti registrati: {count_users()}\n"
         f"{last_line}",
         disable_web_page_preview=True,
+        protect_content=True,
     )
 
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
@@ -288,11 +303,12 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"✅ Backup giornaliero completato.\n🕒 {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC\n📦 {backup_path.name}",
+                protect_content=True,
             )
     except Exception as e:
         logger.exception("Errore nel backup automatico")
         if ADMIN_ID:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup: {e}")
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup: {e}", protect_content=True)
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
@@ -302,45 +318,45 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = Path(BACKUP_DIR) / f"manual_backup_{ts}.db"
         shutil.copy2(DB_FILE, backup_path)
-        await update.message.reply_document(InputFile(str(backup_path)), caption="💾 Backup manuale completato.")
+        await update.message.reply_document(InputFile(str(backup_path)), caption="💾 Backup manuale completato.", protect_content=True)
         logger.info(f"💾 Backup manuale eseguito: {backup_path}")
     except Exception as e:
         logger.exception("Errore backup manuale")
-        await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
+        await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}", protect_content=True)
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/ultimo_backup"); return
     p = Path(BACKUP_DIR)
     if not p.exists():
-        await update.message.reply_text("Nessun backup trovato."); return
+        await update.message.reply_text("Nessun backup trovato.", protect_content=True); return
     files = sorted(p.glob("*.db"), reverse=True)
     if not files:
-        await update.message.reply_text("Nessun backup disponibile."); return
+        await update.message.reply_text("Nessun backup disponibile.", protect_content=True); return
     ultimo = files[0]
-    await update.message.reply_document(InputFile(str(ultimo)), caption=f"📦 Ultimo backup: {ultimo.name}")
+    await update.message.reply_document(InputFile(str(ultimo)), caption=f"📦 Ultimo backup: {ultimo.name}", protect_content=True)
 
 async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/test_backup"); return
-    await update.message.reply_text("⏳ Avvio backup di test…")
+    await update.message.reply_text("⏳ Avvio backup di test…", protect_content=True)
     await backup_job(context)
-    await update.message.reply_text("✅ Test completato.")
+    await update.message.reply_text("✅ Test completato.", protect_content=True)
 
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/list"); return
     users = get_all_users()
     if not users:
-        await update.message.reply_text("📋 Nessun utente registrato."); return
+        await update.message.reply_text("📋 Nessun utente registrato.", protect_content=True); return
     header = f"📋 Elenco utenti ({len(users)} totali)\n"; chunk = header
     for i, u in enumerate(users, start=1):
         uname = f"@{u['username']}" if u['username'] else "-"
         line = f"{i}. {uname} ({u['user_id']})\n"
         if len(chunk) + len(line) > 3500:
-            await update.message.reply_text(chunk); chunk = ""
+            await update.message.reply_text(chunk, protect_content=True); chunk = ""
         chunk += line
-    if chunk: await update.message.reply_text(chunk)
+    if chunk: await update.message.reply_text(chunk, protect_content=True)
 
 async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
@@ -354,7 +370,7 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         w.writerow(["user_id","username","first_name","last_name","joined"])
         for u in users:
             w.writerow([u["user_id"],u["username"] or "",u["first_name"] or "",u["last_name"] or "",u["joined"] or ""])
-    await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)")
+    await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)", protect_content=True)
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
@@ -363,19 +379,19 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and update.message and update.message.reply_to_message:
         text = (update.message.reply_to_message.text or "").strip()
     if not text:
-        await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast"); return
+        await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast", protect_content=True); return
     users = get_all_users()
-    if not users: await update.message.reply_text("❕ Nessun utente a cui inviare."); return
-    ok=fail=0; await update.message.reply_text(f"📣 Invio a {len(users)} utenti…")
+    if not users: await update.message.reply_text("❕ Nessun utente a cui inviare.", protect_content=True); return
+    ok=fail=0; await update.message.reply_text(f"📣 Invio a {len(users)} utenti…", protect_content=True)
     for u in users:
         try:
-            await context.bot.send_message(chat_id=u["user_id"], text=text)
+            await context.bot.send_message(chat_id=u["user_id"], text=text, protect_content=True)
             ok += 1
             await aio.sleep(0.05)
         except Exception:
             fail += 1
             await aio.sleep(0.05)
-    await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}")
+    await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}", protect_content=True)
 
 # ===== /help INTELLIGENTE =====
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,7 +413,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
-    await update.message.reply_text(txt)
+    await update.message.reply_text(txt, protect_content=True)
 
 # ===== WEBHOOK GUARD =====
 async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
