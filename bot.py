@@ -1,14 +1,11 @@
 # =====================================================
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
 # UI: 5 bottoni in home (📖 Menù + 4 sezioni) | Sezioni: 🔙 Back
-# Navigazione in UN SOLO messaggio (edit in-place)
+# Un SOLO messaggio pannello (edit in-place, nessun duplicato)
 # ULTRA-BLINDATO:
 #  - Solo ADMIN vede/usa: /status /backup /ultimo_backup /test_backup /list /export /broadcast /utenti
-#  - Non-admin: nessuna risposta ai comandi sensibili (silenzio)
-#  - Notifica all'ADMIN su ogni tentativo non autorizzato (username, id, comando)
-# Fix: PAGE_MAIN può essere vuoto | CAPTION_MAIN supporta \n
-# Fix robusto: pannello SEMPRE presente dopo /start
-# Backup giornaliero | Anti-conflict | Webhook guard
+#  - Non-admin: silenzio sui comandi sensibili + notifica all'ADMIN
+# Fix: CAPTION_MAIN supporta \n | PAGE_MAIN può essere vuoto
 # =====================================================
 
 import os
@@ -21,10 +18,13 @@ from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes
+)
 import telegram.error as tgerr
 
-VERSION = "2.8-ultra-locked+panel-fix"
+VERSION = "2.9-ultra-locked-single-panel"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -42,7 +42,6 @@ BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC su Render
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
 
-# FOTO + CAPTION (supporto \n da Render)
 PHOTO_URL = os.environ.get(
     "PHOTO_URL",
     "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg",
@@ -121,7 +120,6 @@ def _is_admin(user_id: int) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
 async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: str):
-    """Avvisa l'ADMIN (in silenzio per chi ha tentato)."""
     if not ADMIN_ID:
         return
     uname = f"@{user.username}" if user and user.username else "-"
@@ -157,54 +155,7 @@ def _kb_home() -> InlineKeyboardMarkup:
 def _kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
 
-PANEL_KEY = "panel_msg_id"   # message_id pannello da editare sempre
-
-# === FIX ROBUSTO: garantisce sempre il pannello ===
-async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Garantisce che il messaggio-pannello esista SEMPRE.
-    - Se abbiamo un message_id salvato, proviamo a editarlo.
-    - Se l'edit fallisce (messaggio non trovato, ecc.), ne creiamo uno nuovo.
-    """
-    chat_id = update.effective_chat.id
-    msg_id = context.user_data.get(PANEL_KEY)
-
-    text = PAGES["main"] or "\u2063"        # placeholder invisibile se vuoto
-    kb   = _kb_home()
-
-    if msg_id:
-        try:
-            # allinea almeno la tastiera: se il messaggio non esiste più, qui esplode
-            await context.bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=msg_id,
-                reply_markup=kb,
-            )
-            # opzionale: riallinea anche il testo (se identico -> BadRequest che ignoriamo)
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True,
-                    reply_markup=kb,
-                )
-            except tgerr.BadRequest:
-                pass
-            return chat_id, msg_id
-        except tgerr.BadRequest:
-            # Il messaggio non esiste più o non è editabile: crea nuovo
-            pass
-
-    sent = await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=kb,
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
-    context.user_data[PANEL_KEY] = sent.message_id
-    return chat_id, sent.message_id
+PANEL_KEY = "panel_msg_id"
 
 async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineKeyboardMarkup):
     await context.bot.edit_message_text(
@@ -216,35 +167,77 @@ async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineK
         reply_markup=kb,
     )
 
+# Unico pannello: crea se serve, rimuove eventuale pannello precedente
+async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    existing_id = context.user_data.get(PANEL_KEY)
+
+    text = PAGES["main"] or "\u2063"
+    kb = _kb_home()
+
+    if existing_id:
+        try:
+            await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=existing_id, reply_markup=kb)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id, message_id=existing_id,
+                    text=text, parse_mode="Markdown",
+                    disable_web_page_preview=True, reply_markup=kb
+                )
+            except tgerr.BadRequest:
+                pass
+            return chat_id, existing_id
+        except tgerr.BadRequest:
+            pass  # non esiste più: creeremo un nuovo pannello
+
+    sent = await context.bot.send_message(
+        chat_id=chat_id, text=text, reply_markup=kb,
+        parse_mode="Markdown", disable_web_page_preview=True
+    )
+    if existing_id and existing_id != sent.message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=existing_id)
+        except Exception:
+            pass
+    context.user_data[PANEL_KEY] = sent.message_id
+    return chat_id, sent.message_id
+
 # ===== HANDLERS UTENTE =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
         add_user(user.id, user.username, user.first_name, user.last_name)
-    # Foto + caption
     try:
         await update.message.reply_photo(photo=PHOTO_URL, caption=CAPTION_MAIN, parse_mode="Markdown")
     except Exception as e:
         logger.warning(f"Errore invio foto: {e}")
-    # Pannello home
     await _ensure_panel(update, context)
 
+# *** IMPORTANTE: usa SEMPRE il messaggio del click come pannello ***
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    if not q: return
+    if not q:
+        return
     await q.answer()
-    chat_id, panel_id = await _ensure_panel(update, context)
+
+    chat_id = q.message.chat_id
+    panel_id = q.message.message_id
+    context.user_data[PANEL_KEY] = panel_id  # aggiorna l'ID pannello
+
     data = q.data or ""
     if data == "home":
-        await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home())
+        return
+
     if data.startswith("sec:"):
         key = data.split(":", 1)[1]
-        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back()); return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back())
+        return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong!")
 
-# ===== COMANDI ADMIN (ULTRA BLINDATI: nessuna risposta ai non-admin) =====
+# ===== COMANDI ADMIN (silenzio ai non-admin) =====
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
@@ -417,7 +410,7 @@ async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.debug(f"Guardiano webhook: {e}")
 
-# ===== ANTI-CONFLICT (strong) =====
+# ===== ANTI-CONFLICT =====
 def anti_conflict_prepare(app):
     loop = aio.get_event_loop()
     loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
@@ -439,11 +432,11 @@ def main():
 
     anti_conflict_prepare(app)
 
-    # Comandi pubblici
+    # Pubblici
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ping", ping))
 
-    # Comandi ADMIN (altri utenti: silenzio + notifica admin)
+    # Admin (non-admin: silenzio + notifica)
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("backup", backup_command))
@@ -459,7 +452,7 @@ def main():
     # /help
     app.add_handler(CommandHandler("help", help_command))
 
-    # Ignora qualsiasi altro comando degli utenti normali, in silenzio
+    # Ignora qualsiasi altro comando degli utenti normali
     app.add_handler(MessageHandler(filters.COMMAND, lambda u, c: None))
 
     # Job: webhook guard + backup giornaliero
