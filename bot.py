@@ -7,6 +7,7 @@
 #  - Non-admin: nessuna risposta ai comandi sensibili (silenzio)
 #  - Notifica all'ADMIN su ogni tentativo non autorizzato (username, id, comando)
 # Fix: PAGE_MAIN può essere vuoto | CAPTION_MAIN supporta \n
+# Fix robusto: pannello SEMPRE presente dopo /start
 # Backup giornaliero | Anti-conflict | Webhook guard
 # =====================================================
 
@@ -23,7 +24,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFi
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import telegram.error as tgerr
 
-VERSION = "2.7-ultra-locked"
+VERSION = "2.8-ultra-locked+panel-fix"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -121,10 +122,9 @@ def _is_admin(user_id: int) -> bool:
 
 async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: str):
     """Avvisa l'ADMIN (in silenzio per chi ha tentato)."""
-    if not ADMIN_ID: 
+    if not ADMIN_ID:
         return
     uname = f"@{user.username}" if user and user.username else "-"
-
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
@@ -140,7 +140,7 @@ async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: s
     except Exception:
         pass
 
-# ===== UI / NAVIGAZIONE (1 messaggio) =====
+# ===== UI / NAVIGAZIONE =====
 def _kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Menù",            callback_data="sec:menu")],
@@ -159,17 +159,47 @@ def _kb_back() -> InlineKeyboardMarkup:
 
 PANEL_KEY = "panel_msg_id"   # message_id pannello da editare sempre
 
+# === FIX ROBUSTO: garantisce sempre il pannello ===
 async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Crea (se serve) e restituisce (chat_id, message_id) del pannello home."""
+    """Garantisce che il messaggio-pannello esista SEMPRE.
+    - Se abbiamo un message_id salvato, proviamo a editarlo.
+    - Se l'edit fallisce (messaggio non trovato, ecc.), ne creiamo uno nuovo.
+    """
     chat_id = update.effective_chat.id
     msg_id = context.user_data.get(PANEL_KEY)
+
+    text = PAGES["main"] or "\u2063"        # placeholder invisibile se vuoto
+    kb   = _kb_home()
+
     if msg_id:
-        return chat_id, msg_id
-    text = PAGES["main"] or "\u2063"  # invisibile se vuoto
+        try:
+            # allinea almeno la tastiera: se il messaggio non esiste più, qui esplode
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=msg_id,
+                reply_markup=kb,
+            )
+            # opzionale: riallinea anche il testo (se identico -> BadRequest che ignoriamo)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            except tgerr.BadRequest:
+                pass
+            return chat_id, msg_id
+        except tgerr.BadRequest:
+            # Il messaggio non esiste più o non è editabile: crea nuovo
+            pass
+
     sent = await context.bot.send_message(
         chat_id=chat_id,
         text=text,
-        reply_markup=_kb_home(),
+        reply_markup=kb,
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -214,12 +244,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong!")
 
-# ===== COMANDI ADMIN (ULTRA BLINDATI) =====
-# Nota: questi NON rispondono ai non-admin.
+# ===== COMANDI ADMIN (ULTRA BLINDATI: nessuna risposta ai non-admin) =====
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/utenti")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
     await update.message.reply_text(f"👥 Utenti registrati: {count_users()}")
 
 def _parse_backup_time(hhmm: str) -> dtime:
@@ -241,8 +269,7 @@ def _last_backup_file() -> Path | None:
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/status")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/status"); return
     now_utc = datetime.now(timezone.utc)
     next_bu = _next_backup_utc()
     last = _last_backup_file()
@@ -276,8 +303,7 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/backup")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/backup"); return
     try:
         Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -291,8 +317,7 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/ultimo_backup")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/ultimo_backup"); return
     p = Path(BACKUP_DIR)
     if not p.exists():
         await update.message.reply_text("Nessun backup trovato."); return
@@ -304,16 +329,14 @@ async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/test_backup")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/test_backup"); return
     await update.message.reply_text("⏳ Avvio backup di test…")
     await backup_job(context)
     await update.message.reply_text("✅ Test completato.")
 
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/list")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/list"); return
     users = get_all_users()
     if not users:
         await update.message.reply_text("📋 Nessun utente registrato."); return
@@ -328,8 +351,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/export")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/export"); return
     users = get_all_users()
     Path("./exports").mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -343,8 +365,7 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/broadcast")
-        return
+        await _notify_admin_attempt(context, update.effective_user, "/broadcast"); return
     text = " ".join(context.args).strip() if context.args else ""
     if not text and update.message and update.message.reply_to_message:
         text = (update.message.reply_to_message.text or "").strip()
@@ -382,7 +403,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/broadcast <testo> – Messaggio a tutti"
         )
     else:
-        # Utente normale: niente elenco comandi admin
         txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
     await update.message.reply_text(txt)
 
@@ -423,7 +443,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ping", ping))
 
-    # Comandi ADMIN (gli altri vengono ignorati in silenzio + notifica admin)
+    # Comandi ADMIN (altri utenti: silenzio + notifica admin)
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("backup", backup_command))
@@ -439,7 +459,7 @@ def main():
     # /help
     app.add_handler(CommandHandler("help", help_command))
 
-    # (opzionale) Ignora qualsiasi altro comando degli utenti normali, in silenzio
+    # Ignora qualsiasi altro comando degli utenti normali, in silenzio
     app.add_handler(MessageHandler(filters.COMMAND, lambda u, c: None))
 
     # Job: webhook guard + backup giornaliero
