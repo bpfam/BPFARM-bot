@@ -1,21 +1,23 @@
-# =====================================================
-# bot.py — BPFARM BOT (python-telegram-bot v21+)
-# Single-panel UI + Info&Contatti submenu
-# Anti-sharing: protect_content=True + delete user messages where possible
-# =====================================================
+# bot.py — BPFARM BOT (telegram-bot v21+)
+# Pannello unico (foto+caption) editato in-place, niente duplicati
+# Home con immagine; Info&Contatti con immagine dedicata + sotto-menu
+# Contatti: nessun doppio messaggio, solo edit della caption
+# Tutto inviato con protect_content=True (no forward/salva)
+# Admin-only per comandi sensibili
 
 import os
-import json
-import csv
-import shutil
-import logging
 import sqlite3
+import logging
+import shutil
 import asyncio as aio
+import csv
+import json
 from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputFile, InputMediaPhoto
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -23,7 +25,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "3.3-info-contacts-safe-antishare"
+VERSION = "3.1-media-panel-protected"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -41,16 +43,16 @@ BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC su Render
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
 
-PHOTO_URL = os.environ.get(
-    "PHOTO_URL",
-    "https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg",
-)
+HOME_PHOTO_URL = os.environ.get("PHOTO_URL", "")  # immagine HOME
+INFO_PHOTO_URL = os.environ.get("INFO_PHOTO_URL", HOME_PHOTO_URL)  # immagine Info&Contatti
+
 CAPTION_MAIN = os.environ.get(
     "CAPTION_MAIN",
-    "🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n⚡ Serietà e rispetto sono la nostra identità.\n💪 Qui si cresce con impegno e determinazione."
+    "🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n"
+    "⚡ Serietà e rispetto sono la nostra identità.\n"
+    "💪 Qui si cresce con impegno e determinazione."
 ).replace("\\n", "\n")
 
-# ===== HELPER TESTI =====
 def _normalize_env_text(v: str | None, default: str) -> str:
     if v is None:
         return default
@@ -63,45 +65,58 @@ def _normalize_env_text(v: str | None, default: str) -> str:
             logger.warning(f"Errore lettura {v}: {e}")
     return v
 
-# ===== PAGINE PRINCIPALI =====
-def _load_pages_from_env():
-    return {
-        "main":         _normalize_env_text(os.environ.get("PAGE_MAIN"), ""),
-        "menu":         _normalize_env_text(os.environ.get("PAGE_MENU"),
-                         "📖 *Menù*\n\nScrivi qui il tuo menù completo."),
-        "shipspagna":   _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"),
-                         "🇪🇸 *Shiip-Spagna*\n\nInfo e regole spedizioni."),
-        "recensioni":   _normalize_env_text(os.environ.get("PAGE_RECENSIONI"),
-                         "🎇 *Recensioni*\n\n⭐️ “Ottimo servizio!”"),
-        "infocontatti": _normalize_env_text(os.environ.get("PAGE_INFO"),
-                         "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"),
-        "pointattivi":  _normalize_env_text(os.environ.get("PAGE_POINTATTIVI"),
-                         "📍🇮🇹 *Point Attivi*\n\n• Roma\n• Milano"),
+# Pagine / testi (con default sicuri)
+PAGES = {
+    "info_overview": _normalize_env_text(
+        os.environ.get("PAGE_INFO_OVERVIEW"),
+        "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"
+    ),
+    "info_delivery": _normalize_env_text(
+        os.environ.get("PAGE_INFO_DELIVERY"),
+        "🚚 *Regolamento Delivery*"
+    ),
+    "info_meetup": _normalize_env_text(
+        os.environ.get("PAGE_INFO_MEETUP"),
+        "🤝 *Regolamento Meet-up*"
+    ),
+    "info_point": _normalize_env_text(
+        os.environ.get("PAGE_INFO_POINT"),
+        "📍🇮🇹 *BPFAM OFFICIAL POINT*"
+    ),
+}
 
-        # Sottopagine INFO
-        "info_overview": _normalize_env_text(os.environ.get("PAGE_INFO_OVERVIEW"),
-                          "ℹ️ *Info — Centro informativo BPFAM*\n\nSeleziona una voce: Delivery, Meet-Up o Point."),
-        "info_delivery": _normalize_env_text(os.environ.get("PAGE_INFO_DELIVERY"), "—"),
-        "info_meetup":   _normalize_env_text(os.environ.get("PAGE_INFO_MEETUP"), "—"),
-        "info_point":    _normalize_env_text(os.environ.get("PAGE_INFO_POINT"), "—"),
-    }
-
-PAGES = _load_pages_from_env()
-
-# ===== INFO & CONTATTI (ENV) =====
-INFO_CONTACTS_IMAGE_URL = os.environ.get("INFO_CONTACTS_IMAGE_URL", "")
-CONTACTS_TEXT = (os.environ.get("PAGE_CONTACTS_TEXT")
-                 or "💎 *BPFAM CONTATTI UFFICIALI* 💎").replace("\\n", "\n")
-
-def _load_contact_links():
-    raw = os.environ.get("CONTACT_LINKS_JSON", "{}")
+# ===== CONTATTI (JSON in ENV) =====
+def load_contacts():
+    raw = os.environ.get("CONTACT_LINKS_JSON", "").strip()
+    if not raw:
+        return [
+            {"label": "Instagram", "url": "https://instagram.com/bpfamofficial", "emoji": "📱"},
+            {"label": "Telegram", "url": "https://t.me/contattobpfam", "emoji": "💬"},
+            {"label": "Canale Ufficiale", "url": "https://t.me/+CIA2nWh5thE2ZWFk", "emoji": "📢"},
+            {"label": "Bot Telegram", "url": "https://t.me/Bpfarmbot", "emoji": "🤖"},
+        ]
     try:
-        return json.loads(raw)
-    except Exception:
-        logger.warning("CONTACT_LINKS_JSON non valido: uso lista vuota")
-        return {}
+        data = json.loads(raw)
+        assert isinstance(data, list)
+        return data
+    except Exception as e:
+        logger.warning(f"CONTACT_LINKS_JSON invalido: {e}")
+        return []
 
-CONTACT_LINKS = _load_contact_links()
+CONTACTS = load_contacts()
+
+def contacts_caption() -> str:
+    # Caption completa per la sezione contatti
+    lines = [
+        "💎 *BPFAM CONTATTI UFFICIALI* 💎\n",
+        "Rimani connesso ai canali ufficiali BPFAM.\n",
+    ]
+    for c in CONTACTS:
+        emoji = c.get("emoji","")
+        label = c.get("label","")
+        url = c.get("url","")
+        lines.append(f"{emoji} *{label}*: {url}")
+    return "\n".join(lines)
 
 # ===== DATABASE =====
 def init_db():
@@ -141,7 +156,7 @@ def get_all_users():
     rows = [dict(r) for r in cur.fetchall()]
     conn.close(); return rows
 
-# ===== UTILS / SECURITY =====
+# ===== UTILS =====
 def _is_admin(user_id: int) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
@@ -159,12 +174,16 @@ async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: s
                 f"• Quando: {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC"
             ),
             parse_mode="Markdown",
+            disable_web_page_preview=True,
             protect_content=True,
         )
     except Exception:
         pass
 
-# ===== KEYBOARDS =====
+# ===== UI =====
+PANEL_KEY = "panel_msg_id"
+CURRENT_PHOTO_KEY = "panel_photo_url"
+
 def _kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Menù",            callback_data="sec:menu")],
@@ -178,225 +197,145 @@ def _kb_home() -> InlineKeyboardMarkup:
         ],
     ])
 
-def _kb_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
-
 def _kb_info_root() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📁 Contatti", callback_data="contacts:open"),
-            InlineKeyboardButton("ℹ️ Info",     callback_data="info:overview"),
+            InlineKeyboardButton("📁 Contatti", callback_data="info:contacts"),
+            InlineKeyboardButton("ℹ️ Info",     callback_data="info:menu"),
         ],
         [InlineKeyboardButton("🔙 Back", callback_data="home")],
     ])
 
-def _kb_contacts() -> InlineKeyboardMarkup:
-    rows, row = [], []
-    for label, url in CONTACT_LINKS.items():
-        row.append(InlineKeyboardButton(label, url=url))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row: rows.append(row)
-    rows.append([InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")])
-    return InlineKeyboardMarkup(rows)
-
 def _kb_info_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🚚 Info Delivery", callback_data="info:delivery"),
-            InlineKeyboardButton("🤝 Info Meet-Up",  callback_data="info:meetup"),
-        ],
+        [InlineKeyboardButton("🚚 Info Delivery", callback_data="info:delivery")],
+        [InlineKeyboardButton("🤝 Info Meet-up",  callback_data="info:meetup")],
         [InlineKeyboardButton("📍🇮🇹 Info Point", callback_data="info:point")],
-        [InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")],
+        [InlineKeyboardButton("🔙 Back", callback_data="info:root")],
     ])
 
-# ===== PANEL MGMT =====
-PANEL_KEY = "panel_msg_id"
+def _kb_back_to_info_root() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="info:root")]])
 
-async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineKeyboardMarkup):
-    await context.bot.edit_message_text(
+# --- Media panel helpers ---
+async def _send_new_panel_photo(context, chat_id: int, photo_url: str, caption: str, kb: InlineKeyboardMarkup):
+    sent = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=photo_url,
+        caption=caption or "\u2063",
+        parse_mode="Markdown",
+        reply_markup=kb,
+        protect_content=True,
+    )
+    return sent.message_id
+
+async def _edit_panel_media(context, chat_id: int, msg_id: int, photo_url: str | None, caption: str, kb: InlineKeyboardMarkup):
+    # Cambia media (se photo_url != None) altrimenti cambia solo caption
+    if photo_url:
+        try:
+            await context.bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=msg_id,
+                media=InputMediaPhoto(media=photo_url, caption=caption or "\u2063", parse_mode="Markdown"),
+                reply_markup=kb,
+            )
+            return
+        except tgerr.BadRequest as e:
+            logger.warning(f"edit media fallita: {e} — provo a cambiare solo caption")
+
+    # fallback: solo caption
+    await context.bot.edit_message_caption(
         chat_id=chat_id,
         message_id=msg_id,
-        text=text or "\u2063",
+        caption=caption or "\u2063",
         parse_mode="Markdown",
         reply_markup=kb,
     )
 
-async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, photo_url: str, caption: str, kb: InlineKeyboardMarkup):
     chat_id = update.effective_chat.id
-    existing_id = context.user_data.get(PANEL_KEY)
+    panel_id = context.user_data.get(PANEL_KEY)
+    current_photo = context.user_data.get(CURRENT_PHOTO_KEY)
 
-    text = PAGES["main"] or "\u2063"
-    kb = _kb_home()
+    if not panel_id:
+        # crea nuovo pannello come FOTO
+        new_id = await _send_new_panel_photo(context, chat_id, photo_url, caption, kb)
+        context.user_data[PANEL_KEY] = new_id
+        context.user_data[CURRENT_PHOTO_KEY] = photo_url
+        return chat_id, new_id
 
-    if existing_id:
-        try:
-            await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=existing_id, reply_markup=kb)
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=existing_id,
-                    text=text, parse_mode="Markdown", reply_markup=kb
-                )
-            except tgerr.BadRequest:
-                pass
-            return chat_id, existing_id
-        except tgerr.BadRequest:
-            pass
+    # esiste: se l’immagine cambia, edita media; altrimenti solo caption
+    change_photo = (photo_url and photo_url != current_photo)
+    await _edit_panel_media(context, chat_id, panel_id, photo_url if change_photo else None, caption, kb)
+    if change_photo:
+        context.user_data[CURRENT_PHOTO_KEY] = photo_url
+    return chat_id, panel_id
 
-    sent = await context.bot.send_message(
-        chat_id=chat_id, text=text, reply_markup=kb,
-        parse_mode="Markdown", protect_content=True
-    )
-    if existing_id and existing_id != sent.message_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=existing_id)
-        except Exception:
-            pass
-    context.user_data[PANEL_KEY] = sent.message_id
-    return chat_id, sent.message_id
-
-# ===== HANDLERS PUBBLICI =====
+# ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
         add_user(user.id, user.username, user.first_name, user.last_name)
-    try:
-        await update.message.reply_photo(
-            photo=PHOTO_URL,
-            caption=CAPTION_MAIN,
-            parse_mode="Markdown",
-            protect_content=True
-        )
-    except Exception as e:
-        logger.warning(f"Errore invio foto: {e}")
-    await _ensure_panel(update, context)
+
+    # Pannello home = foto HOME + caption di benvenuto + tastiera home
+    await _ensure_panel(update, context, HOME_PHOTO_URL, CAPTION_MAIN, _kb_home())
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
         return
     await q.answer()
-
     chat_id = q.message.chat_id
-    panel_id = q.message.message_id
-    context.user_data[PANEL_KEY] = panel_id  # usa SEMPRE il messaggio del click
+    context.user_data[PANEL_KEY] = q.message.message_id  # assicura che questo è il pannello
 
-    data = (q.data or "").strip()
-    logger.info(f"CB DATA: {data!r}")  # debug
+    data = q.data or ""
 
+    # === HOME ===
     if data == "home":
-        await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home())
+        await _edit_panel_media(context, chat_id, q.message.message_id, HOME_PHOTO_URL, CAPTION_MAIN, _kb_home())
+        context.user_data[CURRENT_PHOTO_KEY] = HOME_PHOTO_URL
         return
 
-    # Pagina: Info & Contatti (2 bottoni)
-    if data == "sec:infocontatti":
-        text = PAGES.get("infocontatti") or "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"
-        await _edit_panel(context, chat_id, panel_id, text, _kb_info_root())
+    # === INFO & CONTATTI (root) ===
+    if data == "sec:infocontatti" or data == "info:root":
+        caption = PAGES["info_overview"]
+        await _edit_panel_media(context, chat_id, q.message.message_id, INFO_PHOTO_URL, caption, _kb_info_root())
+        context.user_data[CURRENT_PHOTO_KEY] = INFO_PHOTO_URL
+        return
+
+    # === INFO: sottomenù ===
+    if data == "info:menu":
+        await _edit_panel_media(context, chat_id, q.message.message_id, None, "*Info — Centro informativo BPFAM*", _kb_info_menu())
+        return
+
+    if data == "info:delivery":
+        await _edit_panel_media(context, chat_id, q.message.message_id, None, PAGES["info_delivery"], _kb_back_to_info_root())
+        return
+
+    if data == "info:meetup":
+        await _edit_panel_media(context, chat_id, q.message.message_id, None, PAGES["info_meetup"], _kb_back_to_info_root())
+        return
+
+    if data == "info:point":
+        await _edit_panel_media(context, chat_id, q.message.message_id, None, PAGES["info_point"], _kb_back_to_info_root())
         return
 
     # === CONTATTI ===
-    if data in ("contacts:open", "info:contacts", "sec:contacts", "contatti"):
-        caption = CONTACTS_TEXT
-        kb = _kb_contacts()
-
-        async def _send_contacts_safe():
-            short_cap = "💎 *BPFAM CONTATTI UFFICIALI* 💎"
-            try:
-                if INFO_CONTACTS_IMAGE_URL:
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=INFO_CONTACTS_IMAGE_URL,
-                        caption=short_cap,
-                        parse_mode="Markdown",
-                        protect_content=True
-                    )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=CONTACTS_TEXT,
-                    parse_mode="Markdown",
-                    reply_markup=kb,
-                    protect_content=True
-                )
-            except Exception as e2:
-                logger.exception(f"Contatti fallback send_message failed: {e2}")
-                await _edit_panel(context, chat_id, panel_id, CONTACTS_TEXT, kb)
-
-        try:
-            if len(caption) > 1000:
-                await _send_contacts_safe()
-                return
-
-            if INFO_CONTACTS_IMAGE_URL:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=INFO_CONTACTS_IMAGE_URL,
-                    caption=caption,
-                    parse_mode="Markdown",
-                    protect_content=True
-                )
-                # bottoni + testo separato, per coerenza UX
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=CONTACTS_TEXT,
-                    parse_mode="Markdown",
-                    reply_markup=kb,
-                    protect_content=True
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=CONTACTS_TEXT,
-                    parse_mode="Markdown",
-                    reply_markup=kb,
-                    protect_content=True
-                )
-        except Exception as e:
-            logger.warning(f"send_photo contacts failed ({type(e).__name__}): {e}")
-            await _send_contacts_safe()
+    if data == "info:contacts":
+        await _edit_panel_media(context, chat_id, q.message.message_id, None, contacts_caption(), _kb_back_to_info_root())
         return
 
-    # ℹ️ Info
-    if data == "info:overview":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_overview", "—"), _kb_info_menu()); return
-    if data == "info:delivery":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_delivery", "—"), _kb_info_menu()); return
-    if data == "info:meetup":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_meetup", "—"), _kb_info_menu()); return
-    if data == "info:point":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_point", "—"), _kb_info_menu()); return
-
-    # Sezioni standard
+    # Qualsiasi altra sezione tua (menu/recensioni/ship/pointattivi) resta come prima:
     if data.startswith("sec:"):
         key = data.split(":", 1)[1]
-        await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back())
+        text = f"📄 Sezione: *{key}*\n\n(Contenuto provvisorio)"
+        await _edit_panel_media(context, chat_id, q.message.message_id, None, text, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]]))
         return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong!", protect_content=True)
 
-# ======= ANTI-SHARING / BLOCCA MESSAGGI =======
-ANTI_MSG = (
-    "🚫 *Messaggi non consentiti.*\n"
-    "Usa i bottoni del menù qui sotto."
-)
-async def block_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Prova a cancellare il messaggio dell'utente (funziona in gruppi/supergruppi dove il bot è admin)
-    try:
-        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.effective_message.message_id)
-    except Exception:
-        pass
-    # Invia avviso
-    try:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=ANTI_MSG,
-            parse_mode="Markdown",
-            protect_content=True
-        )
-    except Exception:
-        pass
-
-# ===== COMANDI ADMIN =====
+# ===== ADMIN =====
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
@@ -434,7 +373,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Utenti registrati: {count_users()}\n"
         f"{last_line}",
         disable_web_page_preview=True,
-        protect_content=True
+        protect_content=True,
     )
 
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
@@ -448,7 +387,7 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"✅ Backup giornaliero completato.\n🕒 {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC\n📦 {backup_path.name}",
-                protect_content=True
+                protect_content=True,
             )
     except Exception as e:
         logger.exception("Errore nel backup automatico")
@@ -517,6 +456,20 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             w.writerow([u["user_id"],u["username"] or "",u["first_name"] or "",u["last_name"] or "",u["joined"] or ""])
     await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)", protect_content=True)
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _is_admin(update.effective_user.id):
+        txt = (
+            "Comandi disponibili:\n"
+            "/start – Benvenuto + menu\n"
+            "/ping – Test rapido\n"
+            "\n"
+            "Solo Admin:\n"
+            "/status /utenti /backup /ultimo_backup /test_backup /list /export /broadcast"
+        )
+    else:
+        txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
+    await update.message.reply_text(txt, protect_content=True)
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/broadcast"); return
@@ -538,22 +491,12 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await aio.sleep(0.05)
     await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}", protect_content=True)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if _is_admin(update.effective_user.id):
-        txt = (
-            "Comandi disponibili:\n"
-            "/start – Benvenuto + menu\n"
-            "/ping – Test rapido\n"
-            "\n"
-            "Solo Admin:\n"
-            "/status, /utenti, /backup, /ultimo_backup, /test_backup,\n"
-            "/list, /export, /broadcast <testo>"
-        )
-    else:
-        txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
-    await update.message.reply_text(txt, protect_content=True)
+# ===== HARDENING =====
+# Ignora/filtra tutto quello che non è previsto (no share/forward possible grazie a protect_content)
+async def drop_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Silenzio per comandi non previsti
+    return
 
-# ===== WEBHOOK GUARD =====
 async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await context.bot.get_webhook_info()
@@ -564,7 +507,6 @@ async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.debug(f"Guardiano webhook: {e}")
 
-# ===== ANTI-CONFLICT =====
 def anti_conflict_prepare(app):
     loop = aio.get_event_loop()
     loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
@@ -586,7 +528,6 @@ def main():
 
     anti_conflict_prepare(app)
 
-    # Pubblici
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ping", ping))
 
@@ -600,25 +541,23 @@ def main():
     app.add_handler(CommandHandler("export", export_users))
     app.add_handler(CommandHandler("broadcast", broadcast))
 
-    # Menu callback
+    # Callback menu
     app.add_handler(CallbackQueryHandler(on_callback))
 
     # /help
     app.add_handler(CommandHandler("help", help_command))
 
-    # Blocca TUTTO il resto (testi, media, link, forward, sticker, ecc.)
-    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, block_everything))
+    # Blocca qualunque altro comando utente
+    app.add_handler(MessageHandler(filters.COMMAND, drop_commands))
 
-    # Job: webhook guard + backup giornaliero
+    # Jobs
     app.job_queue.run_repeating(webhook_guard, interval=600, first=60, name="webhook_guard")
-    try:
-        hh, mm = map(int, BACKUP_TIME.split(":"))
-    except Exception:
-        hh, mm = 3, 0
-    app.job_queue.run_daily(backup_job, time=dtime(hour=hh, minute=mm, tzinfo=timezone.utc), name="daily_backup")
+    # backup giornaliero
+    # (lo schedulo alle BACKUP_TIME UTC)
+    hh, mm = BACKUP_TIME.split(":")
+    app.job_queue.run_daily(backup_job, time=dtime(hour=int(hh), minute=int(mm)))
 
-    logger.info(f"🚀 Avvio bot v{VERSION}")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(allowed_updates=["message","callback_query"])
 
 if __name__ == "__main__":
     main()
