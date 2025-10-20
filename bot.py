@@ -1,49 +1,45 @@
 # =====================================================
-# bot.py — BPFARM BOT (python-telegram-bot v21+)
-# Pannello unico (edit in-place), niente duplicati
-# Sezione "Info & Contatti" semplificata:
-#   - "Contatti" => solo lista link (no preview), solo Back
-#   - "Info"     => sottomenu Delivery / Meetup / Point
-# Blindato:
-#   - Utenti NON admin: qualunque messaggio non-comando viene cancellato
-#   - Comandi admin silenziati per i non-admin (+ notifica all'admin)
-# Backup giornaliero + utilità admin
+# BPFARM BOT — python-telegram-bot v21+
+# - Pannello unico pulito
+# - Sezione "Info & Contatti": SOLO immagine + 2 bottoni (Contatti/Info)
+# - "Contatti": mostra testo lungo (PAGE_CONTACTS) + bottoni (CONTACT_LINKS_JSON, opzionali)
+# - "Info": sottomenu Delivery/Meet-Up/Point con testi da ENV
+# - Back => sempre all'immagine dell’hub Info-Contatti
+# - Anti-spam: i non-admin non possono inviare nulla
+# - Backup giornaliero + comandi admin
 # =====================================================
 
 import os
-import sqlite3
-import logging
-import shutil
-import asyncio as aio
-import csv
 import json
+import csv
+import shutil
+import logging
+import sqlite3
+import asyncio as aio
 from datetime import datetime, timezone, time as dtime, timedelta, date
 from pathlib import Path
 
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputFile, InputMediaPhoto
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
 import telegram.error as tgerr
 
-VERSION = "3.0-ultra-locked-single-panel"
+VERSION = "3.4-infohub-img-only-it"
 
-# ===== LOGGING =====
+# ================= LOGGING =================
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("bpfarm-bot")
 
-# ===== CONFIG (ENV) =====
+# ================= CONFIG (ENV) =================
 BOT_TOKEN   = os.environ.get("BOT_TOKEN")
 DB_FILE     = os.environ.get("DB_FILE", "./data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "./backup")
-BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC su Render
+BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC
 
 ADMIN_ID_ENV = os.environ.get("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_ENV) if ADMIN_ID_ENV and ADMIN_ID_ENV.isdigit() else None
@@ -57,13 +53,10 @@ CAPTION_MAIN = os.environ.get(
     "🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n⚡ Serietà e rispetto sono la nostra identità.\n💪 Qui si cresce con impegno e determinazione."
 ).replace("\\n", "\n")
 
-# Immagine per la pagina Info & Contatti
-INFO_IMAGE_URL = os.environ.get(
-    "INFO_IMAGE_URL",
-    "https://i.postimg.cc/m2JvXFcH/9-B509-E52-0-D6-A-4-B2-E-8-DE2-68-F81-B0-E9868.png"
-)
+# Card nera/oro "BPFAM INFO & CONTATTI"
+INFO_IMAGE_URL = os.environ.get("INFO_IMAGE_URL", "")
 
-# ===== TESTI PAGINE (ENV) =====
+# ================= TESTI/PAGINE (ENV) =================
 def _normalize_env_text(v: str | None, default: str) -> str:
     if v is None:
         return default
@@ -78,64 +71,29 @@ def _normalize_env_text(v: str | None, default: str) -> str:
 
 def _load_pages_from_env():
     return {
-        "main":        _normalize_env_text(os.environ.get("PAGE_MAIN"), ""),
-        "menu":        _normalize_env_text(os.environ.get("PAGE_MENU"), "📖 *Menù*\n\nScrivi qui il tuo menù completo."),
-        "shipspagna":  _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"), "🇪🇸 *Shiip-Spagna*\n\nInfo e regole spedizioni."),
-        "recensioni":  _normalize_env_text(os.environ.get("PAGE_RECENSIONI"), "🎇 *Recensioni*\n\n⭐️ “Ottimo servizio!”"),
-        "infocontatti":_normalize_env_text(os.environ.get("PAGE_INFO"), "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"),
-        "pointattivi": _normalize_env_text(os.environ.get("PAGE_POINTATTIVI"), "📍🇮🇹 *Point Attivi*\n\n• Roma\n• Milano"),
+        "main":         _normalize_env_text(os.environ.get("PAGE_MAIN"), ""),
+        "menu":         _normalize_env_text(os.environ.get("PAGE_MENU"), "📖 *Menù*\n\nScrivi qui il tuo menù completo."),
+        "shipspagna":   _normalize_env_text(os.environ.get("PAGE_SHIPSPAGNA"), "🇪🇸 *Shiip-Spagna*"),
+        "recensioni":   _normalize_env_text(os.environ.get("PAGE_RECENSIONI"), "🎇 *Recensioni*"),
+        "pointattivi":  _normalize_env_text(os.environ.get("PAGE_POINTATTIVI"), "📍🇮🇹 *Point Attivi*"),
 
-        # Sezioni INFO
-        "info_overview": _normalize_env_text(os.environ.get("PAGE_INFO_OVERVIEW"),
-                           "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"),
-        "info_delivery": _normalize_env_text(os.environ.get("PAGE_INFO_DELIVERY"),
-                           "🧾 *REGOLAMENTO DELIVERY — BPFARM OFFICIAL*\n\n"
-                           "1️⃣ ✅ Verifica dell’identità obbligatoria…\n\n"
-                           "🚗 *SERVIZIO DELIVERY — BPFARM OFFICIAL*\n…"),
-        "info_meetup":   _normalize_env_text(os.environ.get("PAGE_INFO_MEETUP"),
-                           "🧾 *REGOLAMENTO MEET-UP — BPFAM OFFICIAL*\n…"),
-        "info_point":    _normalize_env_text(os.environ.get("PAGE_INFO_POINT"),
-                           "🌐 *BPFAM OFFICIAL POINT* 🌐\n…"),
+        # HUB INFO (se vuoi NESSUN testo sotto la foto, lascia vuoto PAGE_INFO_OVERVIEW)
+        "info_overview": _normalize_env_text(
+            os.environ.get("PAGE_INFO_OVERVIEW"), ""
+        ),
+
+        # SOTTOSEZIONI INFO
+        "info_delivery": _normalize_env_text(os.environ.get("PAGE_INFO_DELIVERY"), "🚚 *Info Delivery*"),
+        "info_meetup":   _normalize_env_text(os.environ.get("PAGE_INFO_MEETUP"),   "🤝 *Info Meet-Up*"),
+        "info_point":    _normalize_env_text(os.environ.get("PAGE_INFO_POINT"),    "📍🇮🇹 *Info Point*"),
+
+        # CONTATTI
+        "contacts":      _normalize_env_text(os.environ.get("PAGE_CONTACTS"), "Contatti non configurati."),
     }
 
 PAGES = _load_pages_from_env()
 
-# ===== CONTATTI (JSON in ENV) =====
-def _load_contacts():
-    raw = os.environ.get("CONTACT_LINKS_JSON")
-    default = [
-        {"label":"Instagram", "url":"https://instagram.com/bpfamofficial", "emoji":"📱"},
-        {"label":"Telegram", "url":"https://t.me/contattobpfam", "emoji":"💬"},
-        {"label":"Canale Ufficiale", "url":"https://t.me/+CIA2nWh5thE2ZWFk", "emoji":"📢"},
-        {"label":"Bot Telegram", "url":"https://t.me/Bpfarmbot", "emoji":"🤖"},
-    ]
-    if not raw:
-        return default
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return data
-        return default
-    except Exception as e:
-        logger.warning(f"CONTACT_LINKS_JSON invalido: {e}")
-        return default
-
-CONTACTS = _load_contacts()
-
-def contacts_caption() -> str:
-    # Solo testo (senza preview); usiamo markdown [ancora] per evitare URL nude
-    lines = [
-        "💎 *BPFAM CONTATTI UFFICIALI* 💎\n",
-        "Rimani connesso ai canali ufficiali BPFAM.\n",
-    ]
-    for c in CONTACTS:
-        emoji = c.get("emoji","")
-        label = c.get("label","")
-        url = c.get("url","")
-        lines.append(f"{emoji} *{label}*: [{label}]({url})")
-    return "\n".join(lines)
-
-# ===== DATABASE =====
+# ================= DATABASE =================
 def init_db():
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
@@ -173,7 +131,7 @@ def get_all_users():
     rows = [dict(r) for r in cur.fetchall()]
     conn.close(); return rows
 
-# ===== UTILS / SECURITY =====
+# ================= UTILS/SECURITY =================
 def _is_admin(user_id: int) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
@@ -196,7 +154,7 @@ async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: s
     except Exception:
         pass
 
-# ===== UI / NAVIGAZIONE =====
+# ================= KEYBOARDS =================
 def _kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Menù",            callback_data="sec:menu")],
@@ -210,83 +168,79 @@ def _kb_home() -> InlineKeyboardMarkup:
         ],
     ])
 
-def _kb_info_root() -> InlineKeyboardMarkup:
+def _kb_back_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
+
+def _kb_infohub() -> InlineKeyboardMarkup:
+    # SOLO i 2 bottoni desiderati + Back
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📦 Contatti", callback_data="info:contacts"),
-            InlineKeyboardButton("ℹ️ Info",     callback_data="info:open"),
+            InlineKeyboardButton("📦 Contatti", callback_data="sec:contacts"),
+            InlineKeyboardButton("ℹ️ Info",     callback_data="sec:info"),
         ],
         [InlineKeyboardButton("🔙 Back", callback_data="home")],
     ])
 
-def _kb_info_menu() -> InlineKeyboardMarkup:
+def _kb_info_sub() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🚚 Info Delivery", callback_data="info:delivery"),
-            InlineKeyboardButton("🤝 Info Meetup",   callback_data="info:meetup"),
+            InlineKeyboardButton("🤝 Info Meet-Up",  callback_data="info:meetup"),
         ],
         [InlineKeyboardButton("📍🇮🇹 Info Point", callback_data="info:point")],
         [InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")],
     ])
 
-def _kb_back_to_info_root() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")]])
+def _build_contact_buttons() -> InlineKeyboardMarkup:
+    """
+    Legge CONTACT_LINKS_JSON (opzionale) e crea bottoni link.
+    Se vuoto o invalido => solo Back.
+    Formato atteso:
+    {
+      "Instagram 📲": "https://instagram.com/bpfamofficial",
+      "Telegram 💬": "https://t.me/contattobpfam",
+      ...
+    }
+    """
+    raw = os.environ.get("CONTACT_LINKS_JSON", "").strip()
+    rows = []
+    if raw:
+        try:
+            data = json.loads(raw)
+            items = list(data.items())
+            for i in range(0, len(items), 2):
+                chunk = items[i:i+2]
+                rows.append([InlineKeyboardButton(txt, url=url) for (txt, url) in chunk])
+        except Exception as e:
+            logger.warning(f"CONTACT_LINKS_JSON invalido: {e}")
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="sec:infocontatti")])
+    return InlineKeyboardMarkup(rows)
 
-def _kb_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
-
+# ================= PANNELLO TESTO =================
 PANEL_KEY = "panel_msg_id"
 
-async def _edit_panel_text(context, chat_id: int, msg_id: int, text: str, kb: InlineKeyboardMarkup):
-    await context.bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=msg_id,
-        text=text or "\u2063",
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-        reply_markup=kb,
-    )
-
-async def _edit_panel_media(context, chat_id: int, msg_id: int,
-                            photo_url: str | None,
-                            caption: str,
-                            kb: InlineKeyboardMarkup):
-    """
-    Se photo_url è fornito => edit media (foto+caption).
-    Altrimenti => edit solo la caption dell'immagine esistente.
-    """
+async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineKeyboardMarkup):
+    # Prova Markdown, altrimenti plain text
     try:
-        if photo_url:
-            await context.bot.edit_message_media(
-                chat_id=chat_id,
-                message_id=msg_id,
-                media=InputMediaPhoto(media=photo_url, caption=caption, parse_mode="Markdown"),
-                reply_markup=kb
-            )
-        else:
-            await context.bot.edit_message_caption(
-                chat_id=chat_id,
-                message_id=msg_id,
-                caption=caption,
-                parse_mode="Markdown",
-                reply_markup=kb
-            )
-    except tgerr.BadRequest as e:
-        # Se il pannello attuale NON è media e proviamo a cambiare solo caption,
-        # ripieghiamo su edit_message_text
-        if "message is not modified" in str(e):
-            pass
-        elif "message content is not modified" in str(e):
-            pass
-        else:
-            # fallback robusto a testo
-            await _edit_panel_text(context, chat_id, msg_id, caption, kb)
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg_id,
+            text=text or "\u2063",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
+    except tgerr.BadRequest:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg_id,
+            text=text or "\u2063",
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
 
-# Unico pannello: crea se serve, rimuove eventuale pannello precedente
 async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Garantisce l'esistenza del pannello testuale (usato per editare contenuti)."""
     chat_id = update.effective_chat.id
     existing_id = context.user_data.get(PANEL_KEY)
-
     text = PAGES["main"] or "\u2063"
     kb = _kb_home()
 
@@ -303,7 +257,7 @@ async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return chat_id, existing_id
         except tgerr.BadRequest:
-            pass  # non esiste più: creeremo un nuovo pannello
+            pass
 
     sent = await context.bot.send_message(
         chat_id=chat_id, text=text, reply_markup=kb,
@@ -317,12 +271,85 @@ async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[PANEL_KEY] = sent.message_id
     return chat_id, sent.message_id
 
-# ===== HANDLERS UTENTE =====
+# ================= INFO HUB (SOLO IMMAGINE) =================
+INFO_PHOTO_KEY = "info_photo_msg_id"
+
+async def _show_infohub(update: Update, context: ContextTypes.DEFAULT_TYPE, panel_id: int):
+    """
+    Mostra SOLO l'immagine (INFO_IMAGE_URL) con i bottoni Contatti/Info.
+    Il pannello testuale viene reso invisibile per evitare doppioni.
+    """
+    chat_id = update.effective_chat.id
+    # rimuovi eventuale immagine precedente
+    old_pid = context.user_data.get(INFO_PHOTO_KEY)
+    if old_pid:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_pid)
+        except Exception:
+            pass
+
+    if INFO_IMAGE_URL:
+        sent = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=INFO_IMAGE_URL,
+            caption=None,                 # nessuna caption
+            reply_markup=_kb_infohub()    # bottoni sulla foto
+        )
+        context.user_data[INFO_PHOTO_KEY] = sent.message_id
+
+    # pannello testuale invisibile (no bottoni) per non creare un secondo balloon
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=panel_id,
+            text="\u2063",
+            disable_web_page_preview=True,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+async def _close_infohub_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Chiude (se presente) la foto dell’hub Info-Contatti."""
+    chat_id = update.effective_chat.id
+    old_pid = context.user_data.get(INFO_PHOTO_KEY)
+    if old_pid:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_pid)
+        except Exception:
+            pass
+        context.user_data.pop(INFO_PHOTO_KEY, None)
+
+# ================= CONTENUTI: CONTATTI & INFO =================
+async def _show_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE, panel_id: int):
+    """
+    Mostra i contatti ufficiali (solo testo) con pulsanti opzionali da CONTACT_LINKS_JSON.
+    Back => torna a sec:infocontatti (immagine).
+    """
+    await _close_infohub_photo(update, context)  # chiudi immagine per schermo pulito
+    text = PAGES.get("contacts", "Contatti non configurati.")
+    kb = _build_contact_buttons()
+    await _edit_panel(context, update.effective_chat.id, panel_id, text, kb)
+
+async def _show_info_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, panel_id: int):
+    """
+    Mostra il sottomenu Info (Delivery/Meet-Up/Point).
+    Se PAGE_INFO_OVERVIEW è vuota, mostra solo i bottoni.
+    """
+    txt = PAGES.get("info_overview", "") or "\u2063"
+    await _edit_panel(context, update.effective_chat.id, panel_id, txt, _kb_info_sub())
+
+async def _show_info_section(update: Update, context: ContextTypes.DEFAULT_TYPE, panel_id: int, key: str):
+    mapping = {"delivery": "info_delivery", "meetup": "info_meetup", "point": "info_point"}
+    text = PAGES.get(mapping.get(key, ""), "Sezione non trovata.")
+    await _edit_panel(context, update.effective_chat.id, panel_id, text, _kb_info_sub())
+
+# ================= HANDLER PUBBLICI =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
         add_user(user.id, user.username, user.first_name, user.last_name)
-    # benvenuto (foto profilo + caption)
+    # benvenuto con foto principale
     try:
         await update.message.reply_photo(photo=PHOTO_URL, caption=CAPTION_MAIN, parse_mode="Markdown")
     except Exception as e:
@@ -337,65 +364,58 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = q.message.chat_id
     panel_id = q.message.message_id
-    context.user_data[PANEL_KEY] = panel_id  # aggiorna l'ID pannello (pannello unico)
+    context.user_data[PANEL_KEY] = panel_id
 
-    data = q.data or ""
+    data = (q.data or "").strip()
 
+    # HOME
     if data == "home":
-        await _edit_panel_text(context, chat_id, panel_id, PAGES["main"], _kb_home())
+        await _close_infohub_photo(update, context)  # chiudi eventuale foto hub
+        await _edit_panel(context, chat_id, panel_id, PAGES["main"], _kb_home())
         return
 
+    # SEZIONI PRINCIPALI
     if data.startswith("sec:"):
         sec = data.split(":", 1)[1]
         if sec == "menu":
-            await _edit_panel_text(context, chat_id, panel_id, PAGES["menu"], _kb_back()); return
+            await _edit_panel(context, chat_id, panel_id, PAGES.get("menu",""), _kb_back_home()); return
         if sec == "shipspagna":
-            await _edit_panel_text(context, chat_id, panel_id, PAGES["shipspagna"], _kb_back()); return
+            await _edit_panel(context, chat_id, panel_id, PAGES.get("shipspagna",""), _kb_back_home()); return
         if sec == "recensioni":
-            await _edit_panel_text(context, chat_id, panel_id, PAGES["recensioni"], _kb_back()); return
+            await _edit_panel(context, chat_id, panel_id, PAGES.get("recensioni",""), _kb_back_home()); return
         if sec == "pointattivi":
-            await _edit_panel_text(context, chat_id, panel_id, PAGES["pointattivi"], _kb_back()); return
+            await _edit_panel(context, chat_id, panel_id, PAGES.get("pointattivi",""), _kb_back_home()); return
+
         if sec == "infocontatti":
-            # Mostriamo IMMAGINE + overview + 2 bottoni (Contatti / Info)
-            await _edit_panel_media(
-                context, chat_id, panel_id,
-                INFO_IMAGE_URL,
-                PAGES.get("info_overview", "📲 *Info & Contatti*\n\nScegli una sezione qui sotto 👇"),
-                _kb_info_root()
-            )
-            return
+            await _show_infohub(update, context, panel_id); return
+        if sec == "contacts":
+            await _show_contacts(update, context, panel_id); return
+        if sec == "info":
+            await _show_info_overview(update, context, panel_id); return
 
-    # ==== SOTTO-MENU INFO & CONTATTI ====
-    if data == "info:contacts":
-        # Semplice: manteniamo la stessa immagine, cambiamo SOLO la caption
-        await _edit_panel_media(
-            context, chat_id, panel_id,
-            None,                      # non tocchiamo la foto
-            contacts_caption(),        # lista link (no preview)
-            _kb_back_to_info_root()
-        )
+    # SOTTOSEZIONI INFO
+    if data.startswith("info:"):
+        sub = data.split(":", 1)[1]  # delivery | meetup | point
+        await _show_info_section(update, context, panel_id, sub)
         return
-
-    if data == "info:open":
-        await _edit_panel_media(
-            context, chat_id, panel_id,
-            None,  # stessa foto
-            "ℹ️ *Centro Informazioni*\n\nScegli una voce:",
-            _kb_info_menu()
-        )
-        return
-
-    if data == "info:delivery":
-        await _edit_panel_media(context, chat_id, panel_id, None, PAGES["info_delivery"], _kb_info_menu()); return
-    if data == "info:meetup":
-        await _edit_panel_media(context, chat_id, panel_id, None, PAGES["info_meetup"], _kb_info_menu()); return
-    if data == "info:point":
-        await _edit_panel_media(context, chat_id, panel_id, None, PAGES["info_point"], _kb_info_menu()); return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong!")
 
-# ===== COMANDI ADMIN =====
+# ================= ANTI-SPAM / NO-MESSAGGI =================
+async def nuke_non_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Cancella qualsiasi messaggio inviato dai NON admin (testo, media, sticker, link, ecc.).
+    In chat private potrebbe non riuscire a cancellare: in tal caso ignora in silenzio.
+    """
+    if update.effective_user and _is_admin(update.effective_user.id):
+        return
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+# ================= COMANDI ADMIN =================
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
@@ -403,8 +423,8 @@ async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _parse_backup_time(hhmm: str) -> dtime:
     try:
-        h, m = map(int, hhmm.split(":")); return dtime(hour=h, minute=m)
-    except: return dtime(hour=3, minute=0)
+        h, m = map(int, hhmm.split(":")); return dtime(hour=h, minute=m, tzinfo=timezone.utc)
+    except: return dtime(hour=3, minute=0, tzinfo=timezone.utc)
 
 def _next_backup_utc() -> datetime:
     run_t = _parse_backup_time(BACKUP_TIME)
@@ -514,28 +534,6 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             w.writerow([u["user_id"],u["username"] or "",u["first_name"] or "",u["last_name"] or "",u["joined"] or ""])
     await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)")
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update.effective_user.id):
-        await _notify_admin_attempt(context, update.effective_user, "/broadcast"); return
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text and update.message and update.message.reply_to_message:
-        text = (update.message.reply_to_message.text or "").strip()
-    if not text:
-        await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast"); return
-    users = get_all_users()
-    if not users: await update.message.reply_text("❕ Nessun utente a cui inviare."); return
-    ok=fail=0; await update.message.reply_text(f"📣 Invio a {len(users)} utenti…")
-    for u in users:
-        try:
-            await context.bot.send_message(chat_id=u["user_id"], text=text, disable_web_page_preview=True)
-            ok += 1
-            await aio.sleep(0.05)
-        except Exception:
-            fail += 1
-            await aio.sleep(0.05)
-    await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}")
-
-# ===== /help =====
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_admin(update.effective_user.id):
         txt = (
@@ -551,7 +549,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
     await update.message.reply_text(txt, disable_web_page_preview=True)
 
-# ===== GUARDIANI =====
+# ================= GUARD & CONFLICT =================
 async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await context.bot.get_webhook_info()
@@ -562,16 +560,6 @@ async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.debug(f"Guardiano webhook: {e}")
 
-# Anti-sharing: cancella TUTTO ciò che non è comando degli utenti non-admin
-async def nuke_non_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user and not _is_admin(user.id):
-        try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.effective_message.id)
-        except Exception:
-            pass
-
-# ===== ANTI-CONFLICT =====
 def anti_conflict_prepare(app):
     loop = aio.get_event_loop()
     loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
@@ -586,7 +574,7 @@ def anti_conflict_prepare(app):
         except Exception as e:
             logger.warning(f"ℹ️ Retry get_updates… ({e})"); loop.run_until_complete(aio.sleep(3))
 
-# ===== MAIN =====
+# ================= MAIN =================
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -598,7 +586,7 @@ def main():
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("help", help_command))
 
-    # Admin (non-admin: silenzio + notifica)
+    # Admin
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("backup", backup_command))
@@ -611,20 +599,15 @@ def main():
     # Menu callback
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    # BLINDATO: cancella tutto ciò che non è comando dei non-admin
-    app.add_handler(MessageHandler(
-        (~filters.COMMAND)
-        & (~filters.StatusUpdate.ALL),
-        nuke_non_admin_messages
-    ), group=1)
+    # Anti-spam: cancella tutto ciò che NON è comando dei non-admin
+    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, nuke_non_admin_messages))
 
     # Job: webhook guard + backup giornaliero
     app.job_queue.run_repeating(webhook_guard, interval=600, first=60, name="webhook_guard")
     hhmm = _parse_backup_time(BACKUP_TIME)
-    # trigger giornaliero approssimato
-    app.job_queue.run_repeating(backup_job, interval=24*3600, first=10, name="daily_backup")
+    app.job_queue.run_daily(backup_job, time=hhmm, name="daily_backup")
 
-    logger.info("🤖 BPFARM bot avviato.")
+    logger.info(f"🚀 Avvio bot v{VERSION}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
