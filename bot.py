@@ -1,12 +1,7 @@
 # =====================================================
 # bot.py — BPFARM BOT (python-telegram-bot v21+)
-# UI: 5 bottoni in home (📖 Menù + 4 sezioni) | Sezioni: 🔙 Back
-# Un SOLO messaggio pannello (edit in-place, nessun duplicato)
-# ULTRA-BLINDATO (admin-only su comandi sensibili)
-# Extra: Sezione 📲 Info & Contatti
-#   - 📁 Contatti: immagine + testo + bottoni URL
-#     (callback tollerante + gestione caption lunga + fallback)
-#   - ℹ️ Info: overview + Delivery / Meet-Up / Point
+# Single-panel UI + Info&Contatti submenu
+# Anti-sharing: protect_content=True + delete user messages where possible
 # =====================================================
 
 import os
@@ -28,7 +23,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "3.2-info-contacts-safe"
+VERSION = "3.3-info-contacts-safe-antishare"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -164,7 +159,7 @@ async def _notify_admin_attempt(context: ContextTypes.DEFAULT_TYPE, user, cmd: s
                 f"• Quando: {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC"
             ),
             parse_mode="Markdown",
-            disable_web_page_preview=True,
+            protect_content=True,
         )
     except Exception:
         pass
@@ -187,7 +182,6 @@ def _kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
 
 def _kb_info_root() -> InlineKeyboardMarkup:
-    # callback tollerante per Contatti
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📁 Contatti", callback_data="contacts:open"),
@@ -225,7 +219,6 @@ async def _edit_panel(context, chat_id: int, msg_id: int, text: str, kb: InlineK
         message_id=msg_id,
         text=text or "\u2063",
         parse_mode="Markdown",
-        disable_web_page_preview=True,
         reply_markup=kb,
     )
 
@@ -242,8 +235,7 @@ async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.edit_message_text(
                     chat_id=chat_id, message_id=existing_id,
-                    text=text, parse_mode="Markdown",
-                    disable_web_page_preview=True, reply_markup=kb
+                    text=text, parse_mode="Markdown", reply_markup=kb
                 )
             except tgerr.BadRequest:
                 pass
@@ -253,7 +245,7 @@ async def _ensure_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sent = await context.bot.send_message(
         chat_id=chat_id, text=text, reply_markup=kb,
-        parse_mode="Markdown", disable_web_page_preview=True
+        parse_mode="Markdown", protect_content=True
     )
     if existing_id and existing_id != sent.message_id:
         try:
@@ -269,7 +261,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         add_user(user.id, user.username, user.first_name, user.last_name)
     try:
-        await update.message.reply_photo(photo=PHOTO_URL, caption=CAPTION_MAIN, parse_mode="Markdown")
+        await update.message.reply_photo(
+            photo=PHOTO_URL,
+            caption=CAPTION_MAIN,
+            parse_mode="Markdown",
+            protect_content=True
+        )
     except Exception as e:
         logger.warning(f"Errore invio foto: {e}")
     await _ensure_panel(update, context)
@@ -297,94 +294,113 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _edit_panel(context, chat_id, panel_id, text, _kb_info_root())
         return
 
-    # === CONTATTI: gestisci PRIMA della regola generica "sec:" ===
+    # === CONTATTI ===
     if data in ("contacts:open", "info:contacts", "sec:contacts", "contatti"):
         caption = CONTACTS_TEXT
         kb = _kb_contacts()
 
-        async def _send_contacts_with_safe_caption():
+        async def _send_contacts_safe():
             short_cap = "💎 *BPFAM CONTATTI UFFICIALI* 💎"
             try:
-                # 1) Foto con caption corta
                 if INFO_CONTACTS_IMAGE_URL:
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=INFO_CONTACTS_IMAGE_URL,
                         caption=short_cap,
                         parse_mode="Markdown",
-                        disable_web_page_preview=True,
+                        protect_content=True
                     )
-                # 2) Testo completo + bottoni
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=CONTACTS_TEXT,
                     parse_mode="Markdown",
-                    disable_web_page_preview=True,
                     reply_markup=kb,
+                    protect_content=True
                 )
             except Exception as e2:
                 logger.exception(f"Contatti fallback send_message failed: {e2}")
                 await _edit_panel(context, chat_id, panel_id, CONTACTS_TEXT, kb)
 
         try:
-            # Se caption è troppo lunga, uso la strategia sicura
             if len(caption) > 1000:
-                await _send_contacts_with_safe_caption()
+                await _send_contacts_safe()
                 return
 
-            # Foto con caption completa + bottoni (se possibile)
             if INFO_CONTACTS_IMAGE_URL:
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=INFO_CONTACTS_IMAGE_URL,
                     caption=caption,
                     parse_mode="Markdown",
-                    disable_web_page_preview=True,
+                    protect_content=True
+                )
+                # bottoni + testo separato, per coerenza UX
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=CONTACTS_TEXT,
+                    parse_mode="Markdown",
                     reply_markup=kb,
+                    protect_content=True
                 )
             else:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=CONTACTS_TEXT,
                     parse_mode="Markdown",
-                    disable_web_page_preview=True,
                     reply_markup=kb,
+                    protect_content=True
                 )
         except Exception as e:
             logger.warning(f"send_photo contacts failed ({type(e).__name__}): {e}")
-            await _send_contacts_with_safe_caption()
+            await _send_contacts_safe()
         return
 
-    # ℹ️ Info: menu
+    # ℹ️ Info
     if data == "info:overview":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_overview", "—"), _kb_info_menu())
-        return
-
-    # ℹ️ Info: 3 pagine
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_overview", "—"), _kb_info_menu()); return
     if data == "info:delivery":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_delivery", "—"), _kb_info_menu())
-        return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_delivery", "—"), _kb_info_menu()); return
     if data == "info:meetup":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_meetup", "—"), _kb_info_menu())
-        return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_meetup", "—"), _kb_info_menu()); return
     if data == "info:point":
-        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_point", "—"), _kb_info_menu())
-        return
+        await _edit_panel(context, chat_id, panel_id, PAGES.get("info_point", "—"), _kb_info_menu()); return
 
-    # Sezioni standard (generic "sec:*")
+    # Sezioni standard
     if data.startswith("sec:"):
         key = data.split(":", 1)[1]
         await _edit_panel(context, chat_id, panel_id, PAGES.get(key, "Pagina non trovata."), _kb_back())
         return
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏓 Pong!")
+    await update.message.reply_text("🏓 Pong!", protect_content=True)
+
+# ======= ANTI-SHARING / BLOCCA MESSAGGI =======
+ANTI_MSG = (
+    "🚫 *Messaggi non consentiti.*\n"
+    "Usa i bottoni del menù qui sotto."
+)
+async def block_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Prova a cancellare il messaggio dell'utente (funziona in gruppi/supergruppi dove il bot è admin)
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.effective_message.message_id)
+    except Exception:
+        pass
+    # Invia avviso
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=ANTI_MSG,
+            parse_mode="Markdown",
+            protect_content=True
+        )
+    except Exception:
+        pass
 
 # ===== COMANDI ADMIN =====
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/utenti"); return
-    await update.message.reply_text(f"👥 Utenti registrati: {count_users()}")
+    await update.message.reply_text(f"👥 Utenti registrati: {count_users()}", protect_content=True)
 
 def _parse_backup_time(hhmm: str) -> dtime:
     try:
@@ -418,6 +434,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Utenti registrati: {count_users()}\n"
         f"{last_line}",
         disable_web_page_preview=True,
+        protect_content=True
     )
 
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
@@ -431,11 +448,12 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"✅ Backup giornaliero completato.\n🕒 {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC\n📦 {backup_path.name}",
+                protect_content=True
             )
     except Exception as e:
         logger.exception("Errore nel backup automatico")
         if ADMIN_ID:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup: {e}")
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup: {e}", protect_content=True)
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
@@ -445,45 +463,45 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = Path(BACKUP_DIR) / f"manual_backup_{ts}.db"
         shutil.copy2(DB_FILE, backup_path)
-        await update.message.reply_document(InputFile(str(backup_path)), caption="💾 Backup manuale completato.")
+        await update.message.reply_document(InputFile(str(backup_path)), caption="💾 Backup manuale completato.", protect_content=True)
         logger.info(f"💾 Backup manuale eseguito: {backup_path}")
     except Exception as e:
         logger.exception("Errore backup manuale")
-        await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}")
+        await update.message.reply_text(f"❌ Errore durante il backup manuale: {e}", protect_content=True)
 
 async def ultimo_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/ultimo_backup"); return
     p = Path(BACKUP_DIR)
     if not p.exists():
-        await update.message.reply_text("Nessun backup trovato."); return
+        await update.message.reply_text("Nessun backup trovato.", protect_content=True); return
     files = sorted(p.glob("*.db"), reverse=True)
     if not files:
-        await update.message.reply_text("Nessun backup disponibile."); return
+        await update.message.reply_text("Nessun backup disponibile.", protect_content=True); return
     ultimo = files[0]
-    await update.message.reply_document(InputFile(str(ultimo)), caption=f"📦 Ultimo backup: {ultimo.name}")
+    await update.message.reply_document(InputFile(str(ultimo)), caption=f"📦 Ultimo backup: {ultimo.name}", protect_content=True)
 
 async def test_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/test_backup"); return
-    await update.message.reply_text("⏳ Avvio backup di test…")
+    await update.message.reply_text("⏳ Avvio backup di test…", protect_content=True)
     await backup_job(context)
-    await update.message.reply_text("✅ Test completato.")
+    await update.message.reply_text("✅ Test completato.", protect_content=True)
 
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         await _notify_admin_attempt(context, update.effective_user, "/list"); return
     users = get_all_users()
     if not users:
-        await update.message.reply_text("📋 Nessun utente registrato."); return
+        await update.message.reply_text("📋 Nessun utente registrato.", protect_content=True); return
     header = f"📋 Elenco utenti ({len(users)} totali)\n"; chunk = header
     for i, u in enumerate(users, start=1):
         uname = f"@{u['username']}" if u['username'] else "-"
         line = f"{i}. {uname} ({u['user_id']})\n"
         if len(chunk) + len(line) > 3500:
-            await update.message.reply_text(chunk); chunk = ""
+            await update.message.reply_text(chunk, protect_content=True); chunk = ""
         chunk += line
-    if chunk: await update.message.reply_text(chunk)
+    if chunk: await update.message.reply_text(chunk, protect_content=True)
 
 async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
@@ -497,7 +515,7 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         w.writerow(["user_id","username","first_name","last_name","joined"])
         for u in users:
             w.writerow([u["user_id"],u["username"] or "",u["first_name"] or "",u["last_name"] or "",u["joined"] or ""])
-    await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)")
+    await update.message.reply_document(InputFile(str(csv_path)), caption=f"📤 Export utenti ({len(users)} record)", protect_content=True)
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
@@ -506,19 +524,19 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and update.message and update.message.reply_to_message:
         text = (update.message.reply_to_message.text or "").strip()
     if not text:
-        await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast"); return
+        await update.message.reply_text("ℹ️ Usa: /broadcast <testo> — oppure rispondi a un messaggio con /broadcast", protect_content=True); return
     users = get_all_users()
-    if not users: await update.message.reply_text("❕ Nessun utente a cui inviare."); return
-    ok=fail=0; await update.message.reply_text(f"📣 Invio a {len(users)} utenti…")
+    if not users: await update.message.reply_text("❕ Nessun utente a cui inviare.", protect_content=True); return
+    ok=fail=0; await update.message.reply_text(f"📣 Invio a {len(users)} utenti…", protect_content=True)
     for u in users:
         try:
-            await context.bot.send_message(chat_id=u["user_id"], text=text)
+            await context.bot.send_message(chat_id=u["user_id"], text=text, protect_content=True)
             ok += 1
             await aio.sleep(0.05)
         except Exception:
             fail += 1
             await aio.sleep(0.05)
-    await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}")
+    await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}", protect_content=True)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_admin(update.effective_user.id):
@@ -528,18 +546,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/ping – Test rapido\n"
             "\n"
             "Solo Admin:\n"
-            "/status – Stato bot\n"
-            "/utenti – Numero utenti\n"
-            "/backup – Backup manuale\n"
-            "/ultimo_backup – Invia l’ultimo file di backup\n"
-            "/test_backup – Esegue job di backup\n"
-            "/list – Elenco utenti\n"
-            "/export – CSV utenti\n"
-            "/broadcast <testo> – Messaggio a tutti"
+            "/status, /utenti, /backup, /ultimo_backup, /test_backup,\n"
+            "/list, /export, /broadcast <testo>"
         )
     else:
         txt = "Comandi disponibili:\n/start – Benvenuto + menu\n/ping – Test rapido"
-    await update.message.reply_text(txt)
+    await update.message.reply_text(txt, protect_content=True)
 
 # ===== WEBHOOK GUARD =====
 async def webhook_guard(context: ContextTypes.DEFAULT_TYPE):
@@ -594,12 +606,11 @@ def main():
     # /help
     app.add_handler(CommandHandler("help", help_command))
 
-    # Ignora qualsiasi altro comando degli utenti normali
-    app.add_handler(MessageHandler(filters.COMMAND, lambda u, c: None))
+    # Blocca TUTTO il resto (testi, media, link, forward, sticker, ecc.)
+    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, block_everything))
 
     # Job: webhook guard + backup giornaliero
     app.job_queue.run_repeating(webhook_guard, interval=600, first=60, name="webhook_guard")
-    # backup giornaliero
     try:
         hh, mm = map(int, BACKUP_TIME.split(":"))
     except Exception:
