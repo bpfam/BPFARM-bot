@@ -6,6 +6,7 @@
 # - Pannello unico: switch foto<->testo senza duplicati
 # - Anti-spam: i non-admin non possono inviare; blocco inoltro su TUTTI gli invii del bot
 # - Admin only: /status /utenti /backup /ultimo_backup /test_backup /list /export /broadcast
+# - + /restore_db (NUOVO) — ripristino DB da file .db via reply
 # - Backup giornaliero alle BACKUP_TIME (UTC)
 # - Anti-conflict: rimuove webhook e occupa polling
 # =====================================================
@@ -180,7 +181,6 @@ def kb_back_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home")]])
 
 def kb_info_root() -> InlineKeyboardMarkup:
-    # Banner con due bottoni
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Contatti", callback_data="contacts:open"),
          InlineKeyboardButton("ℹ️ Info",     callback_data="info:menu")],
@@ -188,7 +188,6 @@ def kb_info_root() -> InlineKeyboardMarkup:
     ])
 
 def kb_info_menu() -> InlineKeyboardMarkup:
-    # 3 cartelle
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚚 Info Delivery", callback_data="info:delivery")],
         [InlineKeyboardButton("🤝 Info Meet-Up",  callback_data="info:meetup")],
@@ -198,7 +197,7 @@ def kb_info_menu() -> InlineKeyboardMarkup:
 
 # ---------------- PANNELLO (UNICO) ----------------
 PANEL_KEY = "panel_msg_id"
-PANEL_IS_PHOTO = "panel_is_photo"  # True se il pannello corrente è foto
+PANEL_IS_PHOTO = "panel_is_photo"
 
 async def switch_to_photo(context, chat_id: int, old_msg_id: int, photo_url: str, caption: str, kb):
     try:
@@ -264,7 +263,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             CAPTION_MAIN, parse_mode="Markdown",
             disable_web_page_preview=True, protect_content=True
         )
-    # crea pannello home
     sent = await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=PAGE_MAIN or "\u2063",
@@ -284,12 +282,9 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     context.user_data[PANEL_KEY] = panel_id
 
-    # HOME
     if data == "home":
-        await switch_to_text(context, chat_id, panel_id, PAGE_MAIN, kb_home())
-        return
+        await switch_to_text(context, chat_id, panel_id, PAGE_MAIN, kb_home()); return
 
-    # SEZIONI BASE
     if data == "sec:menu":
         await switch_to_text(context, chat_id, panel_id, PAGE_MENU, kb_back_home()); return
     if data == "sec:ship":
@@ -299,7 +294,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "sec:points":
         await switch_to_text(context, chat_id, panel_id, PAGE_POINTATTIVI, kb_back_home()); return
 
-    # INFO & CONTATTI ROOT (banner + 2 bottoni)
     if data == "info:root":
         caption = "ℹ️ *Info — Centro informativo BPFAM*"
         if INFO_BANNER_URL:
@@ -308,13 +302,11 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await switch_to_text(context, chat_id, panel_id, caption, kb_info_root())
         return
 
-    # CONTATTI (solo testo lungo)
     if data == "contacts:open":
         await switch_to_text(context, chat_id, panel_id, PAGE_CONTACTS_TEXT,
                              InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="info:root")]]))
         return
 
-    # INFO MENU (3 cartelle)
     if data == "info:menu":
         await switch_to_text(context, chat_id, panel_id, PAGE_INFO_MENU, kb_info_menu()); return
 
@@ -327,7 +319,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- ANTI-MESSAGGI (non-admin) ----------------
 async def block_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ignora ogni messaggio dei non-admin; se in gruppi e con permessi, prova a cancellarlo."""
     u = update.effective_user
     if u and is_admin(u.id):
         return
@@ -337,7 +328,7 @@ async def block_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=chat.id, message_id=update.effective_message.id)
         except Exception:
             pass
-    return  # in privato: silenzio totale
+    return
 
 # ---------------- ADMIN ----------------
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -461,6 +452,63 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await aio.sleep(0.05)
     await update.message.reply_text(f"✅ Inviati: {ok}\n❌ Errori: {fail}", protect_content=True)
 
+# --------- NUOVO: /restore_db (ripristino da file .db via reply) ----------
+async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await notify_admin_attempt(context, update.effective_user, "/restore_db"); 
+        return
+
+    msg = update.effective_message
+    if not msg or not msg.reply_to_message or not msg.reply_to_message.document:
+        await update.message.reply_text(
+            "📦 Per ripristinare:\n"
+            "1) Invia un file **.db** al bot (come *documento*)\n"
+            "2) Fai **Rispondi** a quel messaggio e invia `/restore_db`",
+            parse_mode="Markdown",
+            protect_content=True
+        )
+        return
+
+    doc = msg.reply_to_message.document
+    if not (doc.file_name and doc.file_name.endswith(".db")):
+        await update.message.reply_text("❌ Il file deve avere estensione **.db**", parse_mode="Markdown", protect_content=True)
+        return
+
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(BACKUP_DIR) / f"restore_tmp_{doc.file_unique_id}.db"
+        file = await doc.get_file()
+        await file.download_to_drive(custom_path=str(tmp_path))
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore download file: {e}", protect_content=True)
+        return
+
+    try:
+        safety_copy = Path(BACKUP_DIR) / f"pre_restore_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.bak"
+        if Path(DB_FILE).exists():
+            shutil.copy2(DB_FILE, safety_copy)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore copia di sicurezza: {e}", protect_content=True)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return
+
+    try:
+        Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(tmp_path, DB_FILE)
+        await update.message.reply_text("✅ Database ripristinato con successo. Usa /status per verificare.", protect_content=True)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore ripristino DB: {e}", protect_content=True)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
 # ---------------- /help ----------------
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(update.effective_user.id):
@@ -471,7 +519,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/ping – Test rapido\n\n"
             "Solo Admin:\n"
             "/status /utenti\n"
-            "/backup /ultimo_backup /test_backup\n"
+            "/backup /ultimo_backup /test_backup /restore_db\n"
             "/list /export /broadcast"
         )
     else:
@@ -528,6 +576,7 @@ def main():
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("export", export_users))
     app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("restore_db", restore_db))  # << NEW
 
     # Menu callback
     app.add_handler(CallbackQueryHandler(cb_router))
