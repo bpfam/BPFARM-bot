@@ -168,7 +168,7 @@ def kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Menù", callback_data="sec:menu")],
         [
-            InlineKeyboardButton("🇪🇸 Shiip-Spagna", callback_data="sec:ship"),
+            InlineKeyboardButton("SHIIP🇮🇹📦🇪🇺", callback_data="sec:ship"),
             InlineKeyboardButton("🎇 Recensioni",    callback_data="sec:recs"),
         ],
         [
