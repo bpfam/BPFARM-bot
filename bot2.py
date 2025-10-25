@@ -5,6 +5,8 @@
 # - Solo immagine + titolo + pulsanti (no testo extra)
 # - DB utenti + comandi admin
 # - Backup giornaliero con JobQueue
+# - Anti-share: blocco inoltro/salvataggio e blocco invii non-admin
+# - /restore_db: ripristino DB via reply a file .db
 # =====================================================
 
 import os
@@ -24,10 +26,12 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 import telegram.error as tgerr
 
-VERSION = "2.4-clean"
+VERSION = "2.5-antishare-restore"
 
 # ---------- LOG ----------
 logging.basicConfig(
@@ -112,13 +116,11 @@ def backup_database() -> Path:
     shutil.copy2(DB_FILE, dest)
     return dest
 
-# ---------- HANDLERS ----------
+# ---------- HANDLERS PUBBLICI ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user_if_new(update.effective_user)
 
-    # Solo titolo, senza testo extra
     caption = f"{WELCOME_TITLE}"
-
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton(BUTTON_TEXT, url=BUTTON_URL)]]
     )
@@ -128,13 +130,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo=WELCOME_PHOTO_URL,
             caption=caption,
             reply_markup=keyboard,
+            protect_content=True,            # <-- anti-forward/salvataggio
         )
     except tgerr.BadRequest:
-        await update.effective_message.reply_text(caption, reply_markup=keyboard)
+        await update.effective_message.reply_text(
+            caption,
+            reply_markup=keyboard,
+            protect_content=True,            # <-- anti-forward/salvataggio
+        )
 
+# ---------- ANTI-SHARE / BLOCCO INVII NON-ADMIN ----------
+async def block_non_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina qualsiasi messaggio inviato da non-admin (testo, foto, video, sticker, contatti, ecc.)."""
+    user = update.effective_user
+    if not user or user.id == ADMIN_ID:
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    try:
+        await context.bot.delete_message(chat_id=chat.id, message_id=msg.id)
+    except Exception:
+        pass
+
+# ---------- ADMIN ----------
 async def utenti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    await update.effective_message.reply_text(f"👥 Utenti totali: {count_users()}")
+    await update.effective_message.reply_text(f"👥 Utenti totali: {count_users()}", protect_content=True)
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -144,18 +165,79 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_document(
         document=InputFile(csv_path, filename=csv_path.name),
         caption="Export CSV completato ✅",
+        protect_content=True,
     )
 
 async def backup_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not Path(DB_FILE).exists():
-        await update.effective_message.reply_text("DB non trovato.")
+        await update.effective_message.reply_text("DB non trovato.", protect_content=True)
         return
     dest = backup_database()
     await update.effective_message.reply_document(
         document=InputFile(open(dest, "rb"), filename=dest.name),
         caption=f"Backup creato: {dest.name}",
+        protect_content=True,
     )
+
+# ---------- /restore_db ----------
+async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ripristina il DB da un file .db inviato come documento e richiamato via reply."""
+    if update.effective_user.id != ADMIN_ID: return
+
+    msg = update.effective_message
+    if not msg or not msg.reply_to_message or not msg.reply_to_message.document:
+        await update.effective_message.reply_text(
+            "📦 Per ripristinare:\n"
+            "1) Invia un file **.db** al bot (come *documento*)\n"
+            "2) Fai **Rispondi** a quel messaggio e invia `/restore_db`",
+            protect_content=True,
+        )
+        return
+
+    doc = msg.reply_to_message.document
+    if not (doc.file_name and doc.file_name.endswith(".db")):
+        await update.effective_message.reply_text(
+            "❌ Il file deve avere estensione **.db**",
+            protect_content=True,
+        )
+        return
+
+    # Scarica in tmp
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(BACKUP_DIR) / f"restore_tmp_{doc.file_unique_id}.db"
+        tgfile = await doc.get_file()
+        await tgfile.download_to_drive(custom_path=str(tmp_path))
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Errore download file: {e}", protect_content=True)
+        return
+
+    # Copia di sicurezza
+    try:
+        safety_copy = Path(BACKUP_DIR) / f"pre_restore_{datetime.now().strftime('%Y%m%d-%H%M%S')}.bak"
+        if Path(DB_FILE).exists():
+            shutil.copy2(DB_FILE, safety_copy)
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Errore copia di sicurezza: {e}", protect_content=True)
+        try:
+            if tmp_path.exists(): tmp_path.unlink()
+        except Exception:
+            pass
+        return
+
+    # Sostituzione DB
+    try:
+        Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(tmp_path, DB_FILE)
+        await update.effective_message.reply_text("✅ Database ripristinato. Usa /utenti per verificare.", protect_content=True)
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Errore ripristino DB: {e}", protect_content=True)
+    finally:
+        try:
+            if tmp_path.exists(): tmp_path.unlink()
+        except Exception:
+            pass
 
 # ---------- JOBS ----------
 async def backup_job(context: ContextTypes.DEFAULT_TYPE):
@@ -183,18 +265,25 @@ def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Comandi pubblici / admin
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("utenti", utenti))
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("backup_db", backup_now))
+    app.add_handler(CommandHandler("restore_db", restore_db))   # <-- nuovo
+
+    # Anti-share: blocca TUTTO ciò che non è comando dai non-admin
+    app.add_handler(MessageHandler(~filters.COMMAND, block_non_admin_messages))
 
     async def _post_init(application):
+        # Webhook guard
         try:
             await application.bot.delete_webhook(drop_pending_updates=True)
             log.info("[GUARD] webhook rimosso + pending updates droppati")
         except Exception as e:
             log.warning(f"[GUARD] delete_webhook fallito: {e}")
 
+        # Job backup giornaliero
         bt = parse_backup_time(BACKUP_TIME)
         application.job_queue.run_daily(backup_job, time=bt, name="daily_backup")
         log.info(f"[JOB] backup giornaliero schedulato alle {bt.strftime('%H:%M')}")
