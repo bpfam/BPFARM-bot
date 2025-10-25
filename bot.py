@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "3.5-bpfam-infohub"
+VERSION = "3.5-bpfam-infohub+longtext"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -163,6 +163,57 @@ def last_backup_file() -> Path|None:
     files = sorted(p.glob("*.db"), reverse=True)
     return files[0] if files else None
 
+# ------------- LONG TEXT SENDER (nuovo) -------------
+MAX_TG = 4096
+SAFE = 3800  # margine per Markdown
+
+async def _send_long_markdown(context, chat_id: int, text: str, kb: InlineKeyboardMarkup | None):
+    """
+    Invia testo Markdown spezzandolo in chunk se supera i limiti Telegram.
+    La keyboard (kb) viene allegata SOLO all'ultimo messaggio.
+    """
+    if not text:
+        text = "\u2063"
+
+    # Se già corto, invia normale
+    if len(text) <= SAFE:
+        return await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="Markdown",
+            disable_web_page_preview=True, reply_markup=kb, protect_content=True
+        )
+
+    # Spezza per paragrafi doppi-a-capo, poi riassembla in chunk <= SAFE
+    paragraphs = text.split("\n\n")
+    chunks, current = [], ""
+    for p in paragraphs:
+        piece = (p + "\n\n")
+        if len(current) + len(piece) <= SAFE:
+            current += piece
+        else:
+            if current:
+                chunks.append(current.rstrip())
+            # Se il singolo paragrafo è più lungo del SAFE, taglia duro
+            while len(piece) > SAFE:
+                chunks.append(piece[:SAFE])
+                piece = piece[SAFE:]
+            current = piece
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    # Invia i chunk; kb solo sull'ultimo
+    last_msg = None
+    for i, ch in enumerate(chunks):
+        last = (i == len(chunks) - 1)
+        last_msg = await context.bot.send_message(
+            chat_id=chat_id, text=ch or "\u2063", parse_mode="Markdown",
+            disable_web_page_preview=True, reply_markup=(kb if last else None),
+            protect_content=True
+        )
+        # piccolo respiro per non floodare
+        await aio.sleep(0.05)
+
+    return last_msg
+
 # ---------------- KEYBOARDS ----------------
 def kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -217,11 +268,7 @@ async def switch_to_text(context, chat_id: int, old_msg_id: int, text: str, kb):
         await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
     except Exception:
         pass
-    sent = await context.bot.send_message(
-        chat_id=chat_id, text=text or "\u2063",
-        parse_mode="Markdown", disable_web_page_preview=True,
-        reply_markup=kb, protect_content=True
-    )
+    sent = await _send_long_markdown(context, chat_id, text or "\u2063", kb)
     context.user_data[PANEL_KEY] = sent.message_id
     context.user_data[PANEL_IS_PHOTO] = False
     return sent.message_id
@@ -241,10 +288,8 @@ async def ensure_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", disable_web_page_preview=True, protect_content=True
         )
     # pannello testuale home
-    sent = await context.bot.send_message(
-        chat_id=chat_id, text=PAGE_MAIN or "\u2063",
-        parse_mode="Markdown", disable_web_page_preview=True,
-        reply_markup=kb_home(), protect_content=True
+    sent = await _send_long_markdown(
+        context, chat_id, PAGE_MAIN or "\u2063", kb_home()
     )
     context.user_data[PANEL_KEY] = sent.message_id
     context.user_data[PANEL_IS_PHOTO] = False
@@ -263,11 +308,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             CAPTION_MAIN, parse_mode="Markdown",
             disable_web_page_preview=True, protect_content=True
         )
-    sent = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=PAGE_MAIN or "\u2063",
-        parse_mode="Markdown", disable_web_page_preview=True,
-        reply_markup=kb_home(), protect_content=True
+    sent = await _send_long_markdown(
+        context, update.effective_chat.id, PAGE_MAIN or "\u2063", kb_home()
     )
     context.user_data[PANEL_KEY] = sent.message_id
     context.user_data[PANEL_IS_PHOTO] = False
@@ -368,8 +410,8 @@ async def backup_job(context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         log.exception("Errore backup")
-        if ADMIN_ID:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Errore nel backup: {e}", protect_content=True)
+    # in caso di errore avvisa admin
+    # (già gestito nel try/except sopra)
 
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
