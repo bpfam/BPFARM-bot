@@ -1,10 +1,8 @@
 # =====================================================
-# BPFARM BOT – v3.6 (python-telegram-bot v21+)
-# ✅ Compatibile con Render (/data persistente)
-# ✅ Auto-restore DB se mancante
-# ✅ /restore_db (ripristino da file .db via reply)
-# ✅ Anti-conflict (webhook guard + polling unico)
-# ✅ Backup giornaliero automatico + manuale
+# BPFARM BOT – v3.6.2 (python-telegram-bot v21+)
+# Render-ready: /data persistente, auto-restore, backup giornaliero
+# Help fixato, Info-Contatti affidabile (switch testo<->foto),
+# Anti-conflict (webhook guard), Anti-spam (solo admin in gruppi)
 # =====================================================
 
 import os
@@ -23,7 +21,7 @@ from telegram.ext import (
 )
 import telegram.error as tgerr
 
-VERSION = "3.6-render-autorestore"
+VERSION = "3.6.2"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -49,7 +47,7 @@ def _txt(key: str, default: str = "") -> str:
 BOT_TOKEN   = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID    = int(os.environ.get("ADMIN_ID", "0") or "0") or None
 
-# ✅ Percorsi compatibili Render
+# ✅ Percorsi persistenti Render
 DB_FILE     = os.environ.get("DB_FILE", "/data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "/data/backups")
 BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")  # UTC
@@ -156,6 +154,7 @@ def kb_home() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🎇 Recensioni", callback_data="sec:recs")],
         [InlineKeyboardButton("📲 Info-Contatti", callback_data="info:root"),
          InlineKeyboardButton("📍🇮🇹 Point Attivi", callback_data="sec:points")],
+        [InlineKeyboardButton("❓ Help", callback_data="sec:help")]
     ])
 
 def kb_back_home() -> InlineKeyboardMarkup:
@@ -176,7 +175,26 @@ def kb_info_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Back", callback_data="info:root")]
     ])
 
-# ---------------- HANDLERS ----------------
+# ---------------- HELPERS switch messaggi ----------------
+async def _replace_with_text(q, text, kb):
+    try: await q.message.delete()
+    except Exception: pass
+    await q.bot.send_message(
+        chat_id=q.message.chat_id, text=text or "\u2063",
+        parse_mode="Markdown", disable_web_page_preview=True,
+        reply_markup=kb, protect_content=True
+    )
+
+async def _replace_with_photo(q, url, caption, kb):
+    try: await q.message.delete()
+    except Exception: pass
+    await q.bot.send_photo(
+        chat_id=q.message.chat_id, photo=url,
+        caption=caption or "\u2063", parse_mode="Markdown",
+        reply_markup=kb, protect_content=True
+    )
+
+# ---------------- HANDLERS PUBBLICI ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user)
     try:
@@ -193,39 +211,74 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     disable_web_page_preview=True,
                                     reply_markup=kb_home(), protect_content=True)
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_admin(update.effective_user.id):
+        txt = (
+            "🤖 *BPFARM BOT — Aiuto*\n\n"
+            "/start – Benvenuto + home\n"
+            "/help – Questo aiuto\n"
+            "/restore_db – (rispondi a un file .db)\n\n"
+            "*Solo Admin*\n"
+            "/status – Stato e contatori\n"
+            f"(backup giornaliero automatico alle {BACKUP_TIME} UTC)"
+        )
+    else:
+        txt = (
+            "🤖 *BPFARM BOT — Aiuto*\n\n"
+            "/start – Benvenuto + home\n"
+            "/help – Questo aiuto"
+        )
+    await update.message.reply_text(txt, parse_mode="Markdown", protect_content=True)
+
 async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q: return
     await q.answer()
-    d = q.data
-    chat_id = q.message.chat_id
+    d = q.data or ""
+
     if d == "home":
-        await q.message.edit_text(PAGE_MAIN, parse_mode="Markdown", reply_markup=kb_home()); return
+        await _replace_with_text(q, PAGE_MAIN, kb_home()); return
+
     if d == "sec:menu":
-        await q.message.edit_text(PAGE_MENU, parse_mode="Markdown", reply_markup=kb_back_home()); return
+        await _replace_with_text(q, PAGE_MENU, kb_back_home()); return
     if d == "sec:ship":
-        await q.message.edit_text(PAGE_SHIPSPAGNA, parse_mode="Markdown", reply_markup=kb_back_home()); return
+        await _replace_with_text(q, PAGE_SHIPSPAGNA, kb_back_home()); return
     if d == "sec:recs":
-        await q.message.edit_text(PAGE_RECENSIONI, parse_mode="Markdown", reply_markup=kb_back_home()); return
+        await _replace_with_text(q, PAGE_RECENSIONI, kb_back_home()); return
     if d == "sec:points":
-        await q.message.edit_text(PAGE_POINTATTIVI, parse_mode="Markdown", reply_markup=kb_back_home()); return
+        await _replace_with_text(q, PAGE_POINTATTIVI, kb_back_home()); return
+    if d == "sec:help":
+        await _replace_with_text(q, "Usa /help per l’elenco dei comandi.", kb_back_home()); return
+
     if d == "info:root":
-        await q.message.edit_caption(caption="ℹ️ Info BPFAM", reply_markup=kb_info_root()); return
+        if INFO_BANNER_URL:
+            await _replace_with_photo(q, INFO_BANNER_URL, "ℹ️ *Info — Centro informativo BPFAM*", kb_info_root())
+        else:
+            await _replace_with_text(q, "ℹ️ *Info — Centro informativo BPFAM*", kb_info_root())
+        return
+
     if d == "contacts:open":
-        await q.message.edit_text(PAGE_CONTACTS_TEXT, parse_mode="Markdown",
-                                  reply_markup=kb_back_home()); return
+        await _replace_with_text(q, PAGE_CONTACTS_TEXT, kb_back_home()); return
     if d == "info:menu":
-        await q.message.edit_text(PAGE_INFO_MENU, parse_mode="Markdown",
-                                  reply_markup=kb_info_menu()); return
+        await _replace_with_text(q, PAGE_INFO_MENU, kb_info_menu()); return
     if d == "info:delivery":
-        await q.message.edit_text(PAGE_INFO_DELIVERY, parse_mode="Markdown",
-                                  reply_markup=kb_info_menu()); return
+        await _replace_with_text(q, PAGE_INFO_DELIVERY, kb_info_menu()); return
     if d == "info:meetup":
-        await q.message.edit_text(PAGE_INFO_MEETUP, parse_mode="Markdown",
-                                  reply_markup=kb_info_menu()); return
+        await _replace_with_text(q, PAGE_INFO_MEETUP, kb_info_menu()); return
     if d == "info:point":
-        await q.message.edit_text(PAGE_INFO_POINT, parse_mode="Markdown",
-                                  reply_markup=kb_info_menu()); return
+        await _replace_with_text(q, PAGE_INFO_POINT, kb_info_menu()); return
+
+# ---------------- ANTI-SPAM (non admin nei gruppi) ----------------
+async def block_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    if u and is_admin(u.id):
+        return
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.effective_message.id)
+        except Exception:
+            pass
 
 # ---------------- ADMIN ----------------
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -291,10 +344,15 @@ def main():
 
     # Handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(cb_router))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("restore_db", restore_db))
 
+    # Anti-spam: blocca tutto dai non-admin in gruppi
+    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, block_everything))
+
+    # Backup giornaliero
     hhmm = parse_hhmm(BACKUP_TIME)
     now = datetime.now(timezone.utc)
     first_run = datetime.combine(now.date(), hhmm, tzinfo=timezone.utc)
