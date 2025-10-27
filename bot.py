@@ -1,6 +1,8 @@
 # =====================================================
-# BPFARM BOT – v3.5.1-merge-safe (python-telegram-bot v21+)
-# Identico alla v3.5 originale, con /restore_db che unisce i dati
+# BPFARM BOT – v3.5.2-merge-hardened (ptb v21+)
+# - Identico alla tua v3.5.1, ma:
+#   * init_db: mette in sicurezza lo schema (aggiunge "joined" se manca)
+#   * /restore_db: merge robusto anche se il DB importato non ha "joined"
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio
@@ -11,9 +13,8 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
-import telegram.error as tgerr
 
-VERSION = "3.5.1-merge-safe"
+VERSION = "3.5.2-merge-hardened"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -63,8 +64,21 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
-        username TEXT, first_name TEXT, last_name TEXT, joined TEXT)""")
-    conn.commit(); conn.close()
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        joined TEXT
+    )""")
+    # hardening: se la tabella esisteva senza "joined", aggiungila
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()}
+        if "joined" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN joined TEXT;")
+            conn.commit()
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
 
 def add_user(u):
     if not u: return
@@ -136,13 +150,16 @@ def kb_home():
         [InlineKeyboardButton("📲 Info-Contatti",callback_data="info_root"),
          InlineKeyboardButton("📍🇮🇹 Point Attivi",callback_data="points")]
     ])
+
 def kb_back(to): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back",callback_data=to)]])
+
 def kb_info_root():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Contatti",callback_data="contacts"),
          InlineKeyboardButton("ℹ️ Info",callback_data="info_menu")],
         [InlineKeyboardButton("🔙 Back",callback_data="home")]
     ])
+
 def kb_info_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚚 Delivery",callback_data="info_del")],
@@ -217,30 +234,99 @@ async def backup_job(context):
             await context.bot.send_message(chat_id=ADMIN_ID,text=f"✅ Backup completato {out.name}",protect_content=True)
     except Exception as e: log.exception(e)
 
-# --------- /restore_db (merge) ----------
-async def restore_db(update,context):
-    if not is_admin(update.effective_user.id):return
-    m=update.effective_message
+# --------- /restore_db (merge sicuro) ----------
+async def restore_db(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+
+    m = update.effective_message
     if not m.reply_to_message or not m.reply_to_message.document:
-        await update.message.reply_text("📦 Rispondi a un file .db con /restore_db");return
-    d=m.reply_to_message.document
+        await update.message.reply_text("📦 Rispondi a un file .db con /restore_db")
+        return
+
+    d = m.reply_to_message.document
     if not d.file_name.endswith(".db"):
-        await update.message.reply_text("❌ Il file deve terminare con .db");return
-    Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
-    tmp=Path(BACKUP_DIR)/f"import_{d.file_unique_id}.db"
-    f=await d.get_file(); await f.download_to_drive(custom_path=str(tmp))
+        await update.message.reply_text("❌ Il file deve terminare con .db")
+        return
+
+    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+    tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"
+
+    f = await d.get_file()
+    await f.download_to_drive(custom_path=str(tmp))
+
     try:
-        main=sqlite3.connect(DB_FILE)
-        imp=sqlite3.connect(tmp)
-        imp_cur=imp.cursor(); imp_cur.execute("SELECT user_id,username,first_name,last_name,joined FROM users")
-        rows=imp_cur.fetchall();added=0
-        for r in rows:
-            main.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?)",r)
-            added+=1
-        main.commit(); main.close(); imp.close(); tmp.unlink(missing_ok=True)
-        await update.message.reply_text(f"✅ Merge completato.\nAggiunti {added} utenti.\nTotale ora {count_users()}",protect_content=True)
+        # Assicura schema del DB principale
+        main = sqlite3.connect(DB_FILE)
+        main.execute("""CREATE TABLE IF NOT EXISTS users(
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            joined TEXT
+        )""")
+        try:
+            main.execute("ALTER TABLE users ADD COLUMN joined TEXT;")
+        except Exception:
+            pass
+        main.commit()
+
+        # Legge schema del DB importato
+        imp = sqlite3.connect(tmp)
+        imp.row_factory = sqlite3.Row
+
+        has_users = imp.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='users';"
+        ).fetchone()
+        if not has_users:
+            imp.close(); main.close()
+            tmp.unlink(missing_ok=True)
+            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'.")
+            return
+
+        cols = {r["name"] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
+        need_joined = ("joined" not in cols)
+
+        # Prepara la SELECT in base alle colonne disponibili
+        if need_joined:
+            sel = "SELECT user_id, username, first_name, last_name FROM users"
+        else:
+            sel = "SELECT user_id, username, first_name, last_name, joined FROM users"
+
+        rows = imp.execute(sel).fetchall()
+
+        # Conta prima/dopo per report
+        before = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        to_insert = []
+        if need_joined:
+            for r in rows:
+                to_insert.append((r["user_id"], r["username"], r["first_name"], r["last_name"], now_iso))
+        else:
+            for r in rows:
+                joined_val = r["joined"] if r["joined"] is not None else now_iso
+                to_insert.append((r["user_id"], r["username"], r["first_name"], r["last_name"], joined_val))
+
+        main.executemany(
+            "INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, joined) VALUES (?,?,?,?,?)",
+            to_insert
+        )
+        main.commit()
+
+        after = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        added = after - before
+
+        imp.close(); main.close()
+        tmp.unlink(missing_ok=True)
+
+        await update.message.reply_text(
+            f"✅ Merge completato.\nAggiunti: {added}\nTotale attuale: {after}",
+            protect_content=True
+        )
+
     except Exception as e:
-        await update.message.reply_text(f"❌ Errore merge DB: {e}",protect_content=True)
+        await update.message.reply_text(f"❌ Errore merge DB: {e}", protect_content=True)
 
 async def block_all(update,context):
     if update.effective_chat.type in ("group","supergroup") and not is_admin(update.effective_user.id):
