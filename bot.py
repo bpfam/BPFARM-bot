@@ -3,6 +3,8 @@
 # - Identico alla tua v3.5.1, ma:
 #   * init_db: mette in sicurezza lo schema (aggiunge "joined" se manca)
 #   * /restore_db: merge robusto anche se il DB importato non ha "joined"
+#   * /backup (NUOVO, solo admin): genera e invia .db
+#   * /help   (NUOVO, solo admin): pannello comandi
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio
@@ -328,6 +330,37 @@ async def restore_db(update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Errore merge DB: {e}", protect_content=True)
 
+# --------- /backup (manuale, solo admin) ----------
+async def backup_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return  # nessun output ai non-admin
+
+    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+    out = Path(BACKUP_DIR) / f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
+    shutil.copy2(DB_FILE, out)
+
+    # invia direttamente il file .db all'admin, protetto
+    await update.message.reply_document(
+        document=InputFile(str(out)),
+        filename=out.name,
+        caption=f"✅ Backup generato: {out.name}",
+        disable_content_type_detection=True,
+        protect_content=True
+    )
+
+# --------- /help (solo admin) ----------
+async def help_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return  # nessun output ai non-admin
+
+    msg = (
+        f"🛡 *Pannello Admin* — v{VERSION}\n\n"
+        "/status — stato bot/utenti/backup\n"
+        "/backup — backup immediato (invio file .db)\n"
+        "/restore_db — rispondi a un .db per importare/merge\n"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown", protect_content=True)
+
 async def block_all(update,context):
     if update.effective_chat.type in ("group","supergroup") and not is_admin(update.effective_user.id):
         try: await context.bot.delete_message(update.effective_chat.id,update.effective_message.id)
@@ -344,6 +377,10 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_router))
     app.add_handler(CommandHandler("status",status_cmd))
     app.add_handler(CommandHandler("restore_db",restore_db))
+    # >>> NUOVI COMANDI (solo queste due righe) <<<
+    app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    # ------------------------------------------------
     app.add_handler(MessageHandler(~filters.COMMAND,block_all))
 
     hhmm=parse_hhmm(BACKUP_TIME)
