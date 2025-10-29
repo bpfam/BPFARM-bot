@@ -1,9 +1,8 @@
 # =====================================================
-# BPFARM BOT – v3.5.3-fix-help (ptb v21+)
-# - Identico alla 3.5.2 ma:
-#   * /help ora funziona (usa HTML, nessun errore Markdown)
-#   * /backup /status /restore_db blindati (solo admin)
-#   * delete_webhook protetto (no conflict)
+# BPFARM BOT – v3.5.4-help+utenti (ptb v21+)
+# - Fix /help: HTML con \n (niente <br>) → zero errori parsing
+# - Aggiunto /utenti (solo admin): riepilogo + CSV allegato
+# - Resto invariato e blindato
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio
@@ -15,7 +14,7 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters
 )
 
-VERSION = "3.5.3-fix-help"
+VERSION = "3.5.4-help+utenti"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -70,6 +69,7 @@ def init_db():
         last_name TEXT,
         joined TEXT
     )""")
+    # hardening: se la tabella esisteva senza "joined", aggiungila
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()}
         if "joined" not in cols:
@@ -94,6 +94,13 @@ def count_users():
     conn = sqlite3.connect(DB_FILE)
     n = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     conn.close(); return n
+
+def get_all_users():
+    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, first_name, last_name, joined FROM users ORDER BY joined ASC")
+    out = [dict(r) for r in cur.fetchall()]
+    conn.close(); return out
 
 # ---------------- UTILS ----------------
 def is_admin(uid): return ADMIN_ID and uid == ADMIN_ID
@@ -121,8 +128,7 @@ async def _send_long(context, chat_id, text, kb=None):
         return await context.bot.send_message(chat_id, text=text or "\u2063",
             parse_mode="Markdown", disable_web_page_preview=True,
             reply_markup=kb, protect_content=True)
-    parts=[]
-    cur=""
+    parts=[]; cur=""
     for p in text.split("\n\n"):
         if len(cur)+len(p)<SAFE: cur+=p+"\n\n"
         else: parts.append(cur); cur=p+"\n\n"
@@ -161,12 +167,32 @@ def kb_info_menu():
         [InlineKeyboardButton("🔙 Back",callback_data="info_root")]
     ])
 
+# ---------------- SWITCH PANNELLO ----------------
+async def switch_to_photo(context, chat_id, old_id, url, caption, kb):
+    try: await context.bot.delete_message(chat_id,old_id)
+    except: pass
+    try:
+        sent = await context.bot.send_photo(chat_id,photo=url,
+            caption=caption,parse_mode="Markdown",
+            reply_markup=kb,protect_content=True)
+        return sent.message_id
+    except Exception:
+        return await switch_to_text(context,chat_id,old_id,caption,kb)
+
+async def switch_to_text(context, chat_id, old_id, text, kb):
+    try: await context.bot.delete_message(chat_id,old_id)
+    except: pass
+    sent=await _send_long(context,chat_id,text,kb)
+    return sent.message_id
+
 # ---------------- HANDLERS ----------------
 async def start(update,context):
     add_user(update.effective_user)
-    try: await update.message.reply_photo(photo=PHOTO_URL,caption=CAPTION_MAIN,
-            parse_mode="Markdown",protect_content=True)
-    except: await update.message.reply_text(CAPTION_MAIN,parse_mode="Markdown")
+    try:
+        await update.message.reply_photo(photo=PHOTO_URL,caption=CAPTION_MAIN,
+                                         parse_mode="Markdown",protect_content=True)
+    except:
+        await update.message.reply_text(CAPTION_MAIN,parse_mode="Markdown")
     await _send_long(context,update.effective_chat.id,PAGE_MAIN,kb_home())
 
 async def cb_router(update,context):
@@ -174,26 +200,26 @@ async def cb_router(update,context):
     if not q:return
     await q.answer()
     c=q.data; cid=q.message.chat_id; mid=q.message.message_id
-    if c=="home": await _send_long(context,cid,PAGE_MAIN,kb_home());return
-    if c=="menu": await _send_long(context,cid,PAGE_MENU,kb_back("home"));return
-    if c=="ship": await _send_long(context,cid,PAGE_SHIPSPAGNA,kb_back("home"));return
-    if c=="recs": await _send_long(context,cid,PAGE_RECENSIONI,kb_back("home"));return
-    if c=="points": await _send_long(context,cid,PAGE_POINTATTIVI,kb_back("home"));return
+    if c=="home":   await switch_to_text(context,cid,mid,PAGE_MAIN,kb_home());return
+    if c=="menu":   await switch_to_text(context,cid,mid,PAGE_MENU,kb_back("home"));return
+    if c=="ship":   await switch_to_text(context,cid,mid,PAGE_SHIPSPAGNA,kb_back("home"));return
+    if c=="recs":   await switch_to_text(context,cid,mid,PAGE_RECENSIONI,kb_back("home"));return
+    if c=="points": await switch_to_text(context,cid,mid,PAGE_POINTATTIVI,kb_back("home"));return
     if c=="info_root":
         if INFO_BANNER_URL:
             await switch_to_photo(context,cid,mid,INFO_BANNER_URL,"ℹ️ *Info — Centro informativo BPFAM*",kb_info_root())
         else:
-            await _send_long(context,cid,"ℹ️ *Info — Centro informativo BPFAM*",kb_info_root())
+            await switch_to_text(context,cid,mid,"ℹ️ *Info — Centro informativo BPFAM*",kb_info_root())
         return
-    if c=="contacts": await _send_long(context,cid,PAGE_CONTACTS_TEXT,kb_back("info_root"));return
-    if c=="info_menu": await _send_long(context,cid,PAGE_INFO_MENU,kb_info_menu());return
-    if c=="info_del": await _send_long(context,cid,PAGE_INFO_DELIVERY,kb_info_menu());return
-    if c=="info_meet": await _send_long(context,cid,PAGE_INFO_MEETUP,kb_info_menu());return
-    if c=="info_point": await _send_long(context,cid,PAGE_INFO_POINT,kb_info_menu());return
+    if c=="contacts":  await switch_to_text(context,cid,mid,PAGE_CONTACTS_TEXT,kb_back("info_root"));return
+    if c=="info_menu": await switch_to_text(context,cid,mid,PAGE_INFO_MENU,kb_info_menu());return
+    if c=="info_del":  await switch_to_text(context,cid,mid,PAGE_INFO_DELIVERY,kb_info_menu());return
+    if c=="info_meet": await switch_to_text(context,cid,mid,PAGE_INFO_MEETUP,kb_info_menu());return
+    if c=="info_point":await switch_to_text(context,cid,mid,PAGE_INFO_POINT,kb_info_menu());return
 
 # ---------------- ADMIN ----------------
 async def status_cmd(update,context):
-    if not is_admin(update.effective_user.id):return
+    if not is_admin(update.effective_user.id): return
     now=datetime.now(timezone.utc)
     nxt=next_backup_utc(); last=last_backup_file()
     await update.message.reply_text(
@@ -211,22 +237,16 @@ async def backup_job(context):
 
 # --------- /restore_db (merge sicuro) ----------
 async def restore_db(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-
+    if not is_admin(update.effective_user.id): return
     m = update.effective_message
     if not m.reply_to_message or not m.reply_to_message.document:
-        await update.message.reply_text("📦 Rispondi a un file .db con /restore_db")
-        return
-
+        await update.message.reply_text("📦 Rispondi a un file .db con /restore_db"); return
     d = m.reply_to_message.document
     if not d.file_name.endswith(".db"):
-        await update.message.reply_text("❌ Il file deve terminare con .db")
-        return
+        await update.message.reply_text("❌ Il file deve terminare con .db"); return
 
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
     tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"
-
     f = await d.get_file()
     await f.download_to_drive(custom_path=str(tmp))
 
@@ -243,8 +263,7 @@ async def restore_db(update, context):
         except: pass
         main.commit()
 
-        imp = sqlite3.connect(tmp)
-        imp.row_factory = sqlite3.Row
+        imp = sqlite3.connect(tmp); imp.row_factory = sqlite3.Row
         has_users = imp.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';").fetchone()
         if not has_users:
             imp.close(); main.close(); tmp.unlink(missing_ok=True)
@@ -252,16 +271,19 @@ async def restore_db(update, context):
 
         cols = {r["name"] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
         need_joined = ("joined" not in cols)
-        sel = "SELECT user_id, username, first_name, last_name" + ("" if need_joined else ", joined") + " FROM users"
+        sel = "SELECT user_id, username, first_name, last_name" + ("" if not need_joined else "") + (", joined" if not need_joined else "") + " FROM users"
         rows = imp.execute(sel).fetchall()
 
         before = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         now_iso = datetime.now(timezone.utc).isoformat()
-        to_insert = [
-            (r["user_id"], r["username"], r["first_name"], r["last_name"],
-             r["joined"] if (not need_joined and r["joined"]) else now_iso)
-            for r in rows
-        ]
+        to_insert = []
+        if need_joined:
+            for r in rows:
+                to_insert.append((r["user_id"], r["username"], r["first_name"], r["last_name"], now_iso))
+        else:
+            for r in rows:
+                to_insert.append((r["user_id"], r["username"], r["first_name"], r["last_name"], r["joined"] or now_iso))
+
         main.executemany("INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, joined) VALUES (?,?,?,?,?)", to_insert)
         main.commit()
         after = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -285,14 +307,30 @@ async def backup_cmd(update, context):
         protect_content=True
     )
 
-# --------- /help (solo admin, FIX) ----------
+# --------- /utenti (solo admin): riepilogo + CSV ----------
+async def utenti_cmd(update, context):
+    if not is_admin(update.effective_user.id): return
+    users = get_all_users()
+    n = len(users)
+    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+    csv_path = Path(BACKUP_DIR)/f"users_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["user_id","username","first_name","last_name","joined"])
+        for u in users:
+            w.writerow([u["user_id"], u["username"] or "", u["first_name"] or "", u["last_name"] or "", u["joined"] or ""])
+    await update.message.reply_text(f"👥 Utenti totali: {n}", protect_content=True)
+    await update.message.reply_document(document=InputFile(str(csv_path)), filename=csv_path.name, protect_content=True)
+
+# --------- /help (solo admin) — FIX ----------
 async def help_cmd(update, context):
     if not is_admin(update.effective_user.id): return
     msg = (
-        f"<b>🛡 Pannello Admin</b> — v{VERSION}<br><br>"
-        "/status — stato bot/utenti/backup<br>"
-        "/backup — backup immediato (invio file .db)<br>"
-        "/restore_db — rispondi a un .db per importare/merge"
+        f"<b>🛡 Pannello Admin — v{VERSION}</b>\n\n"
+        "/status — stato bot / utenti / backup\n"
+        "/backup — backup immediato (invia .db)\n"
+        "/restore_db — rispondi a un .db per importare/merge\n"
+        "/utenti — totale e CSV degli utenti"
     )
     await update.message.reply_text(msg, parse_mode="HTML", protect_content=True)
 
@@ -306,6 +344,7 @@ def main():
     if not BOT_TOKEN: raise SystemExit("BOT_TOKEN mancante")
     init_db()
     app=ApplicationBuilder().token(BOT_TOKEN).build()
+    # Webhook guard
     try:
         aio.get_event_loop().run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     except Exception as e:
@@ -316,6 +355,7 @@ def main():
     app.add_handler(CommandHandler("status",status_cmd))
     app.add_handler(CommandHandler("restore_db",restore_db))
     app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("utenti", utenti_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(~filters.COMMAND,block_all))
 
@@ -328,4 +368,4 @@ def main():
     log.info(f"🚀 BPFARM BOT avviato — v{VERSION}")
     app.run_polling(drop_pending_updates=True,allowed_updates=Update.ALL_TYPES)
 
-if __name__=="__main__": main() 
+if __name__=="__main__": main()
