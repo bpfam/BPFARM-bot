@@ -3,8 +3,8 @@
 # - Identico alla tua v3.5.1, ma:
 #   * init_db: mette in sicurezza lo schema (aggiunge "joined" se manca)
 #   * /restore_db: merge robusto anche se il DB importato non ha "joined"
-#   * /backup (NUOVO, solo admin): genera e invia .db
-#   * /help   (NUOVO, solo admin): pannello comandi
+#   * /backup (solo admin) + /help (solo admin)
+#   * harden: delete_webhook in try/except per zero conflitti
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio
@@ -333,13 +333,10 @@ async def restore_db(update, context):
 # --------- /backup (manuale, solo admin) ----------
 async def backup_cmd(update, context):
     if not is_admin(update.effective_user.id):
-        return  # nessun output ai non-admin
-
+        return
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
     out = Path(BACKUP_DIR) / f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
     shutil.copy2(DB_FILE, out)
-
-    # invia direttamente il file .db all'admin, protetto
     await update.message.reply_document(
         document=InputFile(str(out)),
         filename=out.name,
@@ -351,8 +348,7 @@ async def backup_cmd(update, context):
 # --------- /help (solo admin) ----------
 async def help_cmd(update, context):
     if not is_admin(update.effective_user.id):
-        return  # nessun output ai non-admin
-
+        return
     msg = (
         f"🛡 *Pannello Admin* — v{VERSION}\n\n"
         "/status — stato bot/utenti/backup\n"
@@ -371,16 +367,21 @@ def main():
     if not BOT_TOKEN: raise SystemExit("BOT_TOKEN mancante")
     init_db()
     app=ApplicationBuilder().token(BOT_TOKEN).build()
-    aio.get_event_loop().run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
+
+    # Webhook guard: azzera sempre il webhook (silenzioso, zero errori)
+    try:
+        aio.get_event_loop().run_until_complete(
+            app.bot.delete_webhook(drop_pending_updates=True)
+        )
+    except Exception as e:
+        log.warning(f"delete_webhook warning: {e}")
 
     app.add_handler(CommandHandler("start",start))
     app.add_handler(CallbackQueryHandler(cb_router))
     app.add_handler(CommandHandler("status",status_cmd))
     app.add_handler(CommandHandler("restore_db",restore_db))
-    # >>> NUOVI COMANDI (solo queste due righe) <<<
-    app.add_handler(CommandHandler("backup", backup_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    # ------------------------------------------------
+    app.add_handler(CommandHandler("backup", backup_cmd))   # <— aggiunto
+    app.add_handler(CommandHandler("help", help_cmd))       # <— aggiunto
     app.add_handler(MessageHandler(~filters.COMMAND,block_all))
 
     hhmm=parse_hhmm(BACKUP_TIME)
