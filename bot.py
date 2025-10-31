@@ -1,11 +1,11 @@
 # =====================================================
-# BPFARM BOT – v3.5.4-help+utenti (ptb v21+)
-# - Fix /help: HTML con \n (niente <br>) → zero errori parsing
-# - Aggiunto /utenti (solo admin): riepilogo + CSV allegato
-# - Resto invariato e blindato
+# BPFARM BOT – v3.5.5-keepalive+safe-send (ptb v21+)
+# - FIX invio testi: fallback Markdown → HTML → Plain
+# - Aggiunto keep-alive (RENDER_URL) ogni 10 minuti
+# - /help HTML, /utenti CSV, /restore_db merge sicuro
 # =====================================================
 
-import os, csv, shutil, logging, sqlite3, asyncio as aio
+import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date, time as dtime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
@@ -14,7 +14,7 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters
 )
 
-VERSION = "3.5.4-help+utenti"
+VERSION = "3.5.5-keepalive+safe-send"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -69,7 +69,7 @@ def init_db():
         last_name TEXT,
         joined TEXT
     )""")
-    # hardening: se la tabella esisteva senza "joined", aggiungila
+    # hardening: aggiungi "joined" se manca
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()}
         if "joined" not in cols:
@@ -121,23 +121,39 @@ def last_backup_file():
     f=sorted(p.glob("*.db"),reverse=True)
     return f[0] if f else None
 
-# ---------------- TEXT SENDER ----------------
+# ---------------- TEXT SENDER (safe fallback) ----------------
+async def _send_one(context, chat_id, text, kb, mode):
+    return await context.bot.send_message(
+        chat_id,
+        text=text or "\u2063",
+        parse_mode=mode,
+        disable_web_page_preview=True,
+        reply_markup=kb,
+        protect_content=True
+    )
+
 async def _send_long(context, chat_id, text, kb=None):
-    SAFE=3800
-    if len(text)<=SAFE:
-        return await context.bot.send_message(chat_id, text=text or "\u2063",
-            parse_mode="Markdown", disable_web_page_preview=True,
-            reply_markup=kb, protect_content=True)
-    parts=[]; cur=""
-    for p in text.split("\n\n"):
-        if len(cur)+len(p)<SAFE: cur+=p+"\n\n"
-        else: parts.append(cur); cur=p+"\n\n"
-    if cur: parts.append(cur)
-    for i,pt in enumerate(parts):
-        await context.bot.send_message(chat_id,text=pt,
-            parse_mode="Markdown",disable_web_page_preview=True,
-            reply_markup=(kb if i==len(parts)-1 else None),
-            protect_content=True)
+    SAFE = 3800
+    parts = [text] if len(text) <= SAFE else []
+    if not parts:
+        cur = ""
+        for p in text.split("\n\n"):
+            if len(cur) + len(p) < SAFE:
+                cur += p + "\n\n"
+            else:
+                parts.append(cur); cur = p + "\n\n"
+        if cur: parts.append(cur)
+
+    for i, pt in enumerate(parts):
+        last_kb = kb if i == len(parts) - 1 else None
+        # Tenta Markdown, poi HTML, poi plain text
+        for mode in ("Markdown", "HTML", None):
+            try:
+                await _send_one(context, chat_id, pt, last_kb, mode)
+                break
+            except Exception as e:
+                log.warning(f"_send_long fallback ({mode}): {e}")
+                continue
         await aio.sleep(0.05)
 
 # ---------------- KEYBOARDS ----------------
@@ -271,7 +287,7 @@ async def restore_db(update, context):
 
         cols = {r["name"] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
         need_joined = ("joined" not in cols)
-        sel = "SELECT user_id, username, first_name, last_name" + ("" if not need_joined else "") + (", joined" if not need_joined else "") + " FROM users"
+        sel = "SELECT user_id, username, first_name, last_name" + (", joined" if not need_joined else "") + " FROM users"
         rows = imp.execute(sel).fetchall()
 
         before = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -293,7 +309,7 @@ async def restore_db(update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Errore merge DB: {e}",protect_content=True)
 
-# --------- /backup (manuale, solo admin) ----------
+# --------- /backup (manuale) ----------
 async def backup_cmd(update, context):
     if not is_admin(update.effective_user.id): return
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
@@ -307,7 +323,7 @@ async def backup_cmd(update, context):
         protect_content=True
     )
 
-# --------- /utenti (solo admin): riepilogo + CSV ----------
+# --------- /utenti (riepilogo + CSV) ----------
 async def utenti_cmd(update, context):
     if not is_admin(update.effective_user.id): return
     users = get_all_users()
@@ -315,14 +331,13 @@ async def utenti_cmd(update, context):
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
     csv_path = Path(BACKUP_DIR)/f"users_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["user_id","username","first_name","last_name","joined"])
+        w = csv.writer(f); w.writerow(["user_id","username","first_name","last_name","joined"])
         for u in users:
             w.writerow([u["user_id"], u["username"] or "", u["first_name"] or "", u["last_name"] or "", u["joined"] or ""])
     await update.message.reply_text(f"👥 Utenti totali: {n}", protect_content=True)
     await update.message.reply_document(document=InputFile(str(csv_path)), filename=csv_path.name, protect_content=True)
 
-# --------- /help (solo admin) — FIX ----------
+# --------- /help (solo admin) ----------
 async def help_cmd(update, context):
     if not is_admin(update.effective_user.id): return
     msg = (
@@ -338,6 +353,20 @@ async def block_all(update,context):
     if update.effective_chat.type in ("group","supergroup") and not is_admin(update.effective_user.id):
         try: await context.bot.delete_message(update.effective_chat.id,update.effective_message.id)
         except: pass
+
+# --------- KEEP ALIVE (ping ogni 10 min) ----------
+async def keep_alive_job(context):
+    url = os.environ.get("RENDER_URL")
+    if not url: return
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as r:
+                if r.status == 200:
+                    log.info("Ping keep-alive OK ✅")
+                else:
+                    log.warning(f"Ping keep-alive fallito: {r.status}")
+    except Exception as e:
+        log.warning(f"Errore keep-alive: {e}")
 
 # ---------------- MAIN ----------------
 def main():
@@ -359,11 +388,13 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(~filters.COMMAND,block_all))
 
+    # Schedulazioni
     hhmm=parse_hhmm(BACKUP_TIME)
     now=datetime.now(timezone.utc)
     first=datetime.combine(now.date(),hhmm,tzinfo=timezone.utc)
     if first<=now:first+=timedelta(days=1)
-    app.job_queue.run_repeating(backup_job,86400,first=first)
+    app.job_queue.run_repeating(backup_job,86400,first=first)   # ogni 24h
+    app.job_queue.run_repeating(keep_alive_job,600,first=60)    # ogni 10 min
 
     log.info(f"🚀 BPFARM BOT avviato — v{VERSION}")
     app.run_polling(drop_pending_updates=True,allowed_updates=Update.ALL_TYPES)
