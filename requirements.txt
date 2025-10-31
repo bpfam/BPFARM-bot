@@ -1,2 +1,2 @@
-python-3.11.9
+python-telegram-bot==21.6
 aiohttp>=3.9.0
