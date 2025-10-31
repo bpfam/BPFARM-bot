@@ -1,11 +1,13 @@
 # =====================================================
-# BPFARM BOT – v3.5.5-keepalive+safe-send (ptb v21+)
-# - FIX invio testi: fallback Markdown → HTML → Plain
-# - Aggiunto keep-alive (RENDER_URL) ogni 10 minuti
-# - /help HTML, /utenti CSV, /restore_db merge sicuro
+# BPFARM BOT – v3.6.0-broadcast (ptb v21+)
+# - TUTTO come v3.5.5 (keep-alive + safe-send + admin)
+# - NUOVO: /broadcast e /broadcast_stop (solo admin)
+#   * Testo diretto: /broadcast <messaggio>
+#   * Oppure rispondi a un messaggio/media e invia /broadcast
+#   * Rate limit integrato + gestione blocchi/RetryAfter
 # =====================================================
 
-import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp
+import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, urllib.request
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date, time as dtime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
@@ -13,8 +15,9 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
+from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError
 
-VERSION = "3.5.5-keepalive+safe-send"
+VERSION = "3.6.0-broadcast"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -42,6 +45,7 @@ ADMIN_ID    = int(os.environ.get("ADMIN_ID", "0") or "0") or None
 DB_FILE     = os.environ.get("DB_FILE", "./data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "./backup")
 BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")
+RENDER_URL  = os.environ.get("RENDER_URL")
 
 PHOTO_URL   = _txt("PHOTO_URL","https://i.postimg.cc/WbpGbTBH/5-F5-DFE41-C80-D-4-FC2-B4-F6-D105844664B3.jpg")
 CAPTION_MAIN= _txt("CAPTION_MAIN","🏆 *Benvenuto nel bot ufficiale di BPFARM!*\n⚡ Serietà e rispetto sono la nostra identità.\n💪 Qui si cresce con impegno e determinazione.")
@@ -69,7 +73,6 @@ def init_db():
         last_name TEXT,
         joined TEXT
     )""")
-    # hardening: aggiungi "joined" se manca
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()}
         if "joined" not in cols:
@@ -77,8 +80,7 @@ def init_db():
             conn.commit()
     except Exception:
         pass
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 def add_user(u):
     if not u: return
@@ -146,7 +148,6 @@ async def _send_long(context, chat_id, text, kb=None):
 
     for i, pt in enumerate(parts):
         last_kb = kb if i == len(parts) - 1 else None
-        # Tenta Markdown, poi HTML, poi plain text
         for mode in ("Markdown", "HTML", None):
             try:
                 await _send_one(context, chat_id, pt, last_kb, mode)
@@ -345,7 +346,10 @@ async def help_cmd(update, context):
         "/status — stato bot / utenti / backup\n"
         "/backup — backup immediato (invia .db)\n"
         "/restore_db — rispondi a un .db per importare/merge\n"
-        "/utenti — totale e CSV degli utenti"
+        "/utenti — totale e CSV degli utenti\n"
+        "/broadcast <testo> — invia a tutti\n"
+        "/broadcast (in reply) — copia quel contenuto a tutti\n"
+        "/broadcast_stop — interrompe l'invio"
     )
     await update.message.reply_text(msg, parse_mode="HTML", protect_content=True)
 
@@ -354,13 +358,12 @@ async def block_all(update,context):
         try: await context.bot.delete_message(update.effective_chat.id,update.effective_message.id)
         except: pass
 
-# --------- KEEP ALIVE (ping ogni 10 min) ----------
+# --------- KEEP ALIVE ----------
 async def keep_alive_job(context):
-    url = os.environ.get("RENDER_URL")
-    if not url: return
+    if not RENDER_URL: return
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as r:
+            async with session.get(RENDER_URL) as r:
                 if r.status == 200:
                     log.info("Ping keep-alive OK ✅")
                 else:
@@ -368,12 +371,94 @@ async def keep_alive_job(context):
     except Exception as e:
         log.warning(f"Errore keep-alive: {e}")
 
+# --------- /broadcast (solo admin) ----------
+BCAST_SLEEP = 0.08           # ~12-13 msg/sec
+BCAST_PROGRESS_EVERY = 200   # progresso ogni 200 invii
+
+async def broadcast_cmd(update, context):
+    if not is_admin(update.effective_user.id): return
+    m = update.effective_message
+    users = get_all_users()
+    total = len(users)
+    if total == 0:
+        await m.reply_text("Nessun utente nel DB.")
+        return
+
+    context.application.bot_data["broadcast_stop"] = False
+
+    if m.reply_to_message:
+        mode = "copy"
+        text_preview = m.reply_to_message.text or m.reply_to_message.caption or "(media)"
+    else:
+        mode = "text"
+        text_body = " ".join(context.args) if context.args else None
+        if not text_body:
+            await m.reply_text(
+                "Uso:\n"
+                "• /broadcast <testo>\n"
+                "• Oppure rispondi a un messaggio (testo/foto/video/voce) e invia /broadcast"
+            )
+            return
+        text_preview = (text_body[:120] + "…") if len(text_body) > 120 else text_body
+
+    sent = failed = blocked = 0
+    start_msg = await m.reply_text(f"📣 Broadcast iniziato\nUtenti: {total}\nAnteprima: {text_preview}")
+
+    for i, u in enumerate(users, start=1):
+        if context.application.bot_data.get("broadcast_stop"):
+            break
+        chat_id = u["user_id"]
+
+        try:
+            if mode == "copy":
+                await m.reply_to_message.copy(chat_id=chat_id, protect_content=True)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=text_body, protect_content=True, disable_web_page_preview=True)
+            sent += 1
+        except Forbidden:
+            blocked += 1           # utente che ha bloccato il bot
+        except RetryAfter as e:
+            await aio.sleep(e.retry_after + 1)
+            try:
+                if mode == "copy":
+                    await m.reply_to_message.copy(chat_id=chat_id, protect_content=True)
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text=text_body, protect_content=True, disable_web_page_preview=True)
+                sent += 1
+            except Forbidden:
+                blocked += 1
+            except Exception:
+                failed += 1
+        except (BadRequest, NetworkError, Exception):
+            failed += 1
+
+        if i % BCAST_PROGRESS_EVERY == 0:
+            try:
+                await start_msg.edit_text(
+                    f"📣 Broadcast in corso…\n"
+                    f"Inviati: {sent}/{total}\n"
+                    f"Bloccati: {blocked} · Errori: {failed}"
+                )
+            except Exception:
+                pass
+        await aio.sleep(BCAST_SLEEP)
+
+    stopped = context.application.bot_data.get("broadcast_stop", False)
+    status = "⏹️ Interrotto" if stopped else "✅ Completato"
+    await start_msg.edit_text(
+        f"{status}\nTotali: {total}\nInviati: {sent}\nBloccati: {blocked}\nErrori: {failed}"
+    )
+
+async def broadcast_stop_cmd(update, context):
+    if not is_admin(update.effective_user.id): return
+    context.application.bot_data["broadcast_stop"] = True
+    await update.message.reply_text("⏹️ Broadcast: verrà interrotto al prossimo step.")
+
 # ---------------- MAIN ----------------
 def main():
     if not BOT_TOKEN: raise SystemExit("BOT_TOKEN mancante")
     init_db()
     app=ApplicationBuilder().token(BOT_TOKEN).build()
-    # Webhook guard
     try:
         aio.get_event_loop().run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     except Exception as e:
@@ -386,6 +471,8 @@ def main():
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("utenti", utenti_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("broadcast_stop", broadcast_stop_cmd))
     app.add_handler(MessageHandler(~filters.COMMAND,block_all))
 
     # Schedulazioni
