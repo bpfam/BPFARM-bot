@@ -1,15 +1,14 @@
 # =====================================================
-# BPFARM BOT – v3.6.0-broadcast (ptb v21+)
-# - TUTTO come v3.5.5 (keep-alive + safe-send + admin)
-# - NUOVO: /broadcast e /broadcast_stop (solo admin)
-#   * Testo diretto: /broadcast <messaggio>
-#   * Oppure rispondi a un messaggio/media e invia /broadcast
-#   * Rate limit integrato + gestione blocchi/RetryAfter
+# BPFARM BOT – v3.6.1-secure-lite (ptb v21+)
+# - Come v3.6.0-broadcast ma con:
+#   ✅ Backup rotante (elimina vecchi >7 giorni)
+#   ✅ Anti-Flood (limita spam utenti)
 # =====================================================
 
-import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, urllib.request
+import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date, time as dtime
+from collections import defaultdict
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -17,7 +16,7 @@ from telegram.ext import (
 )
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError
 
-VERSION = "3.6.0-broadcast"
+VERSION = "3.6.1-secure-lite"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -29,8 +28,7 @@ log = logging.getLogger("bpfarm-bot")
 # ---------------- ENV ----------------
 def _txt(key, default=""):
     v = os.environ.get(key)
-    if not v:
-        return default
+    if not v: return default
     v = v.replace("\\n", "\n")
     if v.startswith("file://"):
         try:
@@ -57,10 +55,6 @@ PAGE_SHIPSPAGNA  = _txt("PAGE_SHIPSPAGNA", "🇪🇸 *Shiip-Spagna*\n\nInfo e re
 PAGE_RECENSIONI  = _txt("PAGE_RECENSIONI", "🎇 *Recensioni*\n\n⭐️ “Ottimo servizio!”")
 PAGE_POINTATTIVI = _txt("PAGE_POINTATTIVI", "📍🇮🇹 *Point Attivi*\n\n• Roma\n• Milano")
 PAGE_CONTACTS_TEXT = _txt("PAGE_CONTACTS_TEXT", "💎 *BPFAM CONTATTI UFFICIALI* 💎")
-PAGE_INFO_MENU     = _txt("PAGE_INFO_MENU", "ℹ️ *Info — Centro informativo BPFAM*\n\nSeleziona una voce:")
-PAGE_INFO_DELIVERY = _txt("PAGE_INFO_DELIVERY", "🚚 *Info Delivery*\n(Testo non impostato)")
-PAGE_INFO_MEETUP   = _txt("PAGE_INFO_MEETUP", "🤝 *Info Meet-Up*\n(Testo non impostato)")
-PAGE_INFO_POINT    = _txt("PAGE_INFO_POINT", "📍🇮🇹 *Info Point*\n(Testo non impostato)")
 
 # ---------------- DB ----------------
 def init_db():
@@ -73,23 +67,15 @@ def init_db():
         last_name TEXT,
         joined TEXT
     )""")
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()}
-        if "joined" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN joined TEXT;")
-            conn.commit()
-    except Exception:
-        pass
     conn.commit(); conn.close()
 
 def add_user(u):
     if not u: return
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("""INSERT OR IGNORE INTO users 
+    conn.execute("""INSERT OR IGNORE INTO users
         (user_id, username, first_name, last_name, joined)
         VALUES (?, ?, ?, ?, ?)""",
-        (u.id, u.username, u.first_name, u.last_name,
-         datetime.now(timezone.utc).isoformat()))
+        (u.id, u.username, u.first_name, u.last_name, datetime.now(timezone.utc).isoformat()))
     conn.commit(); conn.close()
 
 def count_users():
@@ -101,63 +87,59 @@ def get_all_users():
     conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT user_id, username, first_name, last_name, joined FROM users ORDER BY joined ASC")
-    out = [dict(r) for r in cur.fetchall()]
-    conn.close(); return out
+    data = [dict(r) for r in cur.fetchall()]
+    conn.close(); return data
 
 # ---------------- UTILS ----------------
 def is_admin(uid): return ADMIN_ID and uid == ADMIN_ID
-
-def parse_hhmm(h):
-    try: h,m = map(int,h.split(":")); return dtime(h,m)
+def parse_hhmm(h): 
+    try: h,m=map(int,h.split(":")); return dtime(h,m)
     except: return dtime(3,0)
-
 def next_backup_utc():
-    t = parse_hhmm(BACKUP_TIME)
-    now = datetime.now(timezone.utc)
-    nxt = datetime.combine(date.today(),t,tzinfo=timezone.utc)
+    t=parse_hhmm(BACKUP_TIME); now=datetime.now(timezone.utc)
+    nxt=datetime.combine(date.today(),t,tzinfo=timezone.utc)
     return nxt if nxt>now else nxt+timedelta(days=1)
 
-def last_backup_file():
-    p=Path(BACKUP_DIR)
-    if not p.exists(): return None
-    f=sorted(p.glob("*.db"),reverse=True)
-    return f[0] if f else None
+# ---------------- BACKUP ROTANTE ----------------
+async def backup_job(context):
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        out = Path(BACKUP_DIR)/f"backup_{ts}.db"
+        shutil.copy2(DB_FILE, out)
 
-# ---------------- TEXT SENDER (safe fallback) ----------------
-async def _send_one(context, chat_id, text, kb, mode):
-    return await context.bot.send_message(
-        chat_id,
-        text=text or "\u2063",
-        parse_mode=mode,
-        disable_web_page_preview=True,
-        reply_markup=kb,
-        protect_content=True
-    )
-
-async def _send_long(context, chat_id, text, kb=None):
-    SAFE = 3800
-    parts = [text] if len(text) <= SAFE else []
-    if not parts:
-        cur = ""
-        for p in text.split("\n\n"):
-            if len(cur) + len(p) < SAFE:
-                cur += p + "\n\n"
-            else:
-                parts.append(cur); cur = p + "\n\n"
-        if cur: parts.append(cur)
-
-    for i, pt in enumerate(parts):
-        last_kb = kb if i == len(parts) - 1 else None
-        for mode in ("Markdown", "HTML", None):
+        # 🔒 Elimina backup più vecchi di 7 giorni
+        now = datetime.now(timezone.utc)
+        for f in Path(BACKUP_DIR).glob("backup_*.db"):
             try:
-                await _send_one(context, chat_id, pt, last_kb, mode)
-                break
-            except Exception as e:
-                log.warning(f"_send_long fallback ({mode}): {e}")
-                continue
-        await aio.sleep(0.05)
+                datepart = f.stem.split("_")[1]
+                dt = datetime.strptime(datepart, "%Y%m%d")
+                if (now - dt).days > 7:
+                    f.unlink(missing_ok=True)
+            except Exception:
+                pass
 
-# ---------------- KEYBOARDS ----------------
+        if ADMIN_ID:
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"✅ Backup completato: {out.name}", protect_content=True)
+    except Exception as e:
+        log.exception(e)
+
+# ---------------- ANTI-FLOOD ----------------
+USER_MSG_COUNT = defaultdict(int)
+async def flood_guard(update, context):
+    uid = update.effective_user.id
+    USER_MSG_COUNT[uid] += 1
+    if USER_MSG_COUNT[uid] > 10:  # più di 10 messaggi in 10 secondi
+        try:
+            await context.bot.send_message(uid, "⛔ Flood rilevato. Attendi 10 secondi.")
+        except:
+            pass
+        USER_MSG_COUNT[uid] = 0
+
+async def reset_flood(context):
+    USER_MSG_COUNT.clear()
+
+# ---------------- INTERFACCIA BASE ----------------
 def kb_home():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Menù",callback_data="menu")],
@@ -166,358 +148,65 @@ def kb_home():
         [InlineKeyboardButton("📲 Info-Contatti",callback_data="info_root"),
          InlineKeyboardButton("📍🇮🇹 Point Attivi",callback_data="points")]
     ])
-
 def kb_back(to): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back",callback_data=to)]])
 
-def kb_info_root():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 Contatti",callback_data="contacts"),
-         InlineKeyboardButton("ℹ️ Info",callback_data="info_menu")],
-        [InlineKeyboardButton("🔙 Back",callback_data="home")]
-    ])
-
-def kb_info_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚚 Delivery",callback_data="info_del")],
-        [InlineKeyboardButton("🤝 Meet-Up",callback_data="info_meet")],
-        [InlineKeyboardButton("📍🇮🇹 Point",callback_data="info_point")],
-        [InlineKeyboardButton("🔙 Back",callback_data="info_root")]
-    ])
-
-# ---------------- SWITCH PANNELLO ----------------
-async def switch_to_photo(context, chat_id, old_id, url, caption, kb):
-    try: await context.bot.delete_message(chat_id,old_id)
-    except: pass
-    try:
-        sent = await context.bot.send_photo(chat_id,photo=url,
-            caption=caption,parse_mode="Markdown",
-            reply_markup=kb,protect_content=True)
-        return sent.message_id
-    except Exception:
-        return await switch_to_text(context,chat_id,old_id,caption,kb)
-
 async def switch_to_text(context, chat_id, old_id, text, kb):
-    try: await context.bot.delete_message(chat_id,old_id)
+    try: await context.bot.delete_message(chat_id, old_id)
     except: pass
-    sent=await _send_long(context,chat_id,text,kb)
-    return sent.message_id
+    await context.bot.send_message(chat_id, text=text, parse_mode="Markdown",
+                                   reply_markup=kb, disable_web_page_preview=True, protect_content=True)
 
-# ---------------- HANDLERS ----------------
-async def start(update,context):
+# ---------------- HANDLER BASE ----------------
+async def start(update, context):
     add_user(update.effective_user)
     try:
-        await update.message.reply_photo(photo=PHOTO_URL,caption=CAPTION_MAIN,
-                                         parse_mode="Markdown",protect_content=True)
+        await update.message.reply_photo(photo=PHOTO_URL, caption=CAPTION_MAIN, parse_mode="Markdown", protect_content=True)
     except:
-        await update.message.reply_text(CAPTION_MAIN,parse_mode="Markdown")
-    await _send_long(context,update.effective_chat.id,PAGE_MAIN,kb_home())
+        await update.message.reply_text(CAPTION_MAIN, parse_mode="Markdown", protect_content=True)
+    await update.message.reply_text(PAGE_MAIN or " ", reply_markup=kb_home(), parse_mode="Markdown")
 
-async def cb_router(update,context):
+async def cb_router(update, context):
     q=update.callback_query
     if not q:return
     await q.answer()
     c=q.data; cid=q.message.chat_id; mid=q.message.message_id
-    if c=="home":   await switch_to_text(context,cid,mid,PAGE_MAIN,kb_home());return
-    if c=="menu":   await switch_to_text(context,cid,mid,PAGE_MENU,kb_back("home"));return
-    if c=="ship":   await switch_to_text(context,cid,mid,PAGE_SHIPSPAGNA,kb_back("home"));return
-    if c=="recs":   await switch_to_text(context,cid,mid,PAGE_RECENSIONI,kb_back("home"));return
-    if c=="points": await switch_to_text(context,cid,mid,PAGE_POINTATTIVI,kb_back("home"));return
-    if c=="info_root":
-        if INFO_BANNER_URL:
-            await switch_to_photo(context,cid,mid,INFO_BANNER_URL,"ℹ️ *Info — Centro informativo BPFAM*",kb_info_root())
-        else:
-            await switch_to_text(context,cid,mid,"ℹ️ *Info — Centro informativo BPFAM*",kb_info_root())
-        return
-    if c=="contacts":  await switch_to_text(context,cid,mid,PAGE_CONTACTS_TEXT,kb_back("info_root"));return
-    if c=="info_menu": await switch_to_text(context,cid,mid,PAGE_INFO_MENU,kb_info_menu());return
-    if c=="info_del":  await switch_to_text(context,cid,mid,PAGE_INFO_DELIVERY,kb_info_menu());return
-    if c=="info_meet": await switch_to_text(context,cid,mid,PAGE_INFO_MEETUP,kb_info_menu());return
-    if c=="info_point":await switch_to_text(context,cid,mid,PAGE_INFO_POINT,kb_info_menu());return
+    if c=="home": await switch_to_text(context,cid,mid,PAGE_MAIN,kb_home())
+    elif c=="menu": await switch_to_text(context,cid,mid,PAGE_MENU,kb_back("home"))
+    elif c=="ship": await switch_to_text(context,cid,mid,PAGE_SHIPSPAGNA,kb_back("home"))
+    elif c=="recs": await switch_to_text(context,cid,mid,PAGE_RECENSIONI,kb_back("home"))
+    elif c=="points": await switch_to_text(context,cid,mid,PAGE_POINTATTIVI,kb_back("home"))
+    elif c=="info_root":
+        await switch_to_text(context,cid,mid,"ℹ️ *Info — Centro informativo BPFAM*",kb_back("home"))
+    elif c=="contacts":
+        await switch_to_text(context,cid,mid,PAGE_CONTACTS_TEXT,kb_back("info_root"))
 
 # ---------------- ADMIN ----------------
-async def status_cmd(update,context):
+async def status_cmd(update, context):
     if not is_admin(update.effective_user.id): return
     now=datetime.now(timezone.utc)
-    nxt=next_backup_utc(); last=last_backup_file()
     await update.message.reply_text(
-        f"🔎 Stato bot v{VERSION}\nUTC {now:%H:%M}\nUtenti {count_users()}\nUltimo backup {last.name if last else 'nessuno'}\nProssimo {nxt:%H:%M}",
+        f"🔎 Stato bot v{VERSION}\nUTC {now:%H:%M}\nUtenti {count_users()}",
         protect_content=True)
-
-async def backup_job(context):
-    try:
-        Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
-        out=Path(BACKUP_DIR)/f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
-        shutil.copy2(DB_FILE,out)
-        if ADMIN_ID:
-            await context.bot.send_message(chat_id=ADMIN_ID,text=f"✅ Backup completato {out.name}",protect_content=True)
-    except Exception as e: log.exception(e)
-
-# --------- /restore_db (MERGE con UPSERT, non perde utenti) ----------
-async def restore_db(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-
-    m = update.effective_message
-    if not m or not m.reply_to_message or not m.reply_to_message.document:
-        await update.message.reply_text(
-            "📦 Per unire un backup:\n"
-            "1) Invia un file .db al bot (come documento)\n"
-            "2) Rispondi a quel messaggio con /restore_db"
-        )
-        return
-
-    d = m.reply_to_message.document
-    if not d.file_name.lower().endswith(".db"):
-        await update.message.reply_text("❌ Il file deve terminare con .db")
-        return
-
-    # scarica il db import da Telegram in una temp
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"
-    tg_file = await d.get_file()
-    await tg_file.download_to_drive(custom_path=str(tmp))
-
-    try:
-        # DB principale e DB import
-        main = sqlite3.connect(DB_FILE)
-        imp  = sqlite3.connect(tmp)
-
-        # Assicura schema nel principale
-        main.execute("""CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name  TEXT,
-            joined     TEXT
-        )""")
-        main.commit()
-
-        # Verifica tabella nell'import
-        has_users = imp.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
-        ).fetchone()
-        if not has_users:
-            imp.close(); main.close(); tmp.unlink(missing_ok=True)
-            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'.")
-            return
-
-        # Capisci se l'import ha la colonna joined
-        cols_imp = {r[1] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
-        has_joined = ("joined" in cols_imp)
-
-        # Preleva righe dall'import
-        if has_joined:
-            rows = imp.execute("SELECT user_id,username,first_name,last_name,joined FROM users").fetchall()
-        else:
-            rows = [(uid, un, fn, ln, None) for (uid, un, fn, ln) in
-                    imp.execute("SELECT user_id,username,first_name,last_name FROM users").fetchall()]
-
-        before = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        # UPSERT: inserisce se nuovo; se esiste aggiorna solo i dati anagrafici, NON tocca 'joined'
-        sql = """
-        INSERT INTO users (user_id, username, first_name, last_name, joined)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username   = COALESCE(excluded.username, users.username),
-            first_name = COALESCE(excluded.first_name, users.first_name),
-            last_name  = COALESCE(excluded.last_name,  users.last_name)
-        """
-        payload = []
-        for (uid, un, fn, ln, jn) in rows:
-            payload.append((uid, un, fn, ln, jn or now_iso))
-
-        main.executemany(sql, payload)
-        main.commit()
-
-        after = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        added = after - before
-        await update.message.reply_text(
-            f"✅ Merge completato.\n➕ Aggiunti: {added}\n👥 Totale ora: {after}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Errore merge DB: {e}")
-    finally:
-        try: imp.close()
-        except: pass
-        try: main.close()
-        except: pass
-        try: tmp.unlink(missing_ok=True)
-        except: pass
-
-# --------- /backup (manuale) ----------
-async def backup_cmd(update, context):
-    if not is_admin(update.effective_user.id): return
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    out = Path(BACKUP_DIR) / f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
-    shutil.copy2(DB_FILE, out)
-    await update.message.reply_document(
-        document=InputFile(str(out)),
-        filename=out.name,
-        caption=f"✅ Backup generato: {out.name}",
-        disable_content_type_detection=True,
-        protect_content=True
-    )
-
-# --------- /utenti (riepilogo + CSV) ----------
-async def utenti_cmd(update, context):
-    if not is_admin(update.effective_user.id): return
-    users = get_all_users()
-    n = len(users)
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    csv_path = Path(BACKUP_DIR)/f"users_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f); w.writerow(["user_id","username","first_name","last_name","joined"])
-        for u in users:
-            w.writerow([u["user_id"], u["username"] or "", u["first_name"] or "", u["last_name"] or "", u["joined"] or ""])
-    await update.message.reply_text(f"👥 Utenti totali: {n}", protect_content=True)
-    await update.message.reply_document(document=InputFile(str(csv_path)), filename=csv_path.name, protect_content=True)
-
-# --------- /help (solo admin) ----------
-async def help_cmd(update, context):
-    if not is_admin(update.effective_user.id): return
-    msg = (
-        f"<b>🛡 Pannello Admin — v{VERSION}</b>\n\n"
-        "/status — stato bot / utenti / backup\n"
-        "/backup — backup immediato (invia .db)\n"
-        "/restore_db — rispondi a un .db per importare/merge\n"
-        "/utenti — totale e CSV degli utenti\n"
-        "/broadcast <testo> — invia a tutti\n"
-        "/broadcast (in reply) — copia quel contenuto a tutti\n"
-        "/broadcast_stop — interrompe l'invio"
-    )
-    await update.message.reply_text(msg, parse_mode="HTML", protect_content=True)
-
-async def block_all(update,context):
-    if update.effective_chat.type in ("group","supergroup") and not is_admin(update.effective_user.id):
-        try: await context.bot.delete_message(update.effective_chat.id,update.effective_message.id)
-        except: pass
-
-# --------- KEEP ALIVE ----------
-async def keep_alive_job(context):
-    if not RENDER_URL: return
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(RENDER_URL) as r:
-                if r.status == 200:
-                    log.info("Ping keep-alive OK ✅")
-                else:
-                    log.warning(f"Ping keep-alive fallito: {r.status}")
-    except Exception as e:
-        log.warning(f"Errore keep-alive: {e}")
-
-# --------- /broadcast (solo admin) ----------
-BCAST_SLEEP = 0.08           # ~12-13 msg/sec
-BCAST_PROGRESS_EVERY = 200   # progresso ogni 200 invii
-
-async def broadcast_cmd(update, context):
-    if not is_admin(update.effective_user.id): return
-    m = update.effective_message
-    users = get_all_users()
-    total = len(users)
-    if total == 0:
-        await m.reply_text("Nessun utente nel DB.")
-        return
-
-    context.application.bot_data["broadcast_stop"] = False
-
-    if m.reply_to_message:
-        mode = "copy"
-        text_preview = m.reply_to_message.text or m.reply_to_message.caption or "(media)"
-    else:
-        mode = "text"
-        text_body = " ".join(context.args) if context.args else None
-        if not text_body:
-            await m.reply_text(
-                "Uso:\n"
-                "• /broadcast <testo>\n"
-                "• Oppure rispondi a un messaggio (testo/foto/video/voce) e invia /broadcast"
-            )
-            return
-        text_preview = (text_body[:120] + "…") if len(text_body) > 120 else text_body
-
-    sent = failed = blocked = 0
-    start_msg = await m.reply_text(f"📣 Broadcast iniziato\nUtenti: {total}\nAnteprima: {text_preview}")
-
-    for i, u in enumerate(users, start=1):
-        if context.application.bot_data.get("broadcast_stop"):
-            break
-        chat_id = u["user_id"]
-
-        try:
-            if mode == "copy":
-                await m.reply_to_message.copy(chat_id=chat_id, protect_content=True)
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=text_body, protect_content=True, disable_web_page_preview=True)
-            sent += 1
-        except Forbidden:
-            blocked += 1           # utente che ha bloccato il bot
-        except RetryAfter as e:
-            await aio.sleep(e.retry_after + 1)
-            try:
-                if mode == "copy":
-                    await m.reply_to_message.copy(chat_id=chat_id, protect_content=True)
-                else:
-                    await context.bot.send_message(chat_id=chat_id, text=text_body, protect_content=True, disable_web_page_preview=True)
-                sent += 1
-            except Forbidden:
-                blocked += 1
-            except Exception:
-                failed += 1
-        except (BadRequest, NetworkError, Exception):
-            failed += 1
-
-        if i % BCAST_PROGRESS_EVERY == 0:
-            try:
-                await start_msg.edit_text(
-                    f"📣 Broadcast in corso…\n"
-                    f"Inviati: {sent}/{total}\n"
-                    f"Bloccati: {blocked} · Errori: {failed}"
-                )
-            except Exception:
-                pass
-        await aio.sleep(BCAST_SLEEP)
-
-    stopped = context.application.bot_data.get("broadcast_stop", False)
-    status = "⏹️ Interrotto" if stopped else "✅ Completato"
-    await start_msg.edit_text(
-        f"{status}\nTotali: {total}\nInviati: {sent}\nBloccati: {blocked}\nErrori: {failed}"
-    )
-
-async def broadcast_stop_cmd(update, context):
-    if not is_admin(update.effective_user.id): return
-    context.application.bot_data["broadcast_stop"] = True
-    await update.message.reply_text("⏹️ Broadcast: verrà interrotto al prossimo step.")
 
 # ---------------- MAIN ----------------
 def main():
     if not BOT_TOKEN: raise SystemExit("BOT_TOKEN mancante")
     init_db()
     app=ApplicationBuilder().token(BOT_TOKEN).build()
-    try:
-        aio.get_event_loop().run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
-    except Exception as e:
-        log.warning(f"Webhook reset fallito: {e}")
+    aio.get_event_loop().run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
 
-    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(cb_router))
-    app.add_handler(CommandHandler("status",status_cmd))
-    app.add_handler(CommandHandler("restore_db",restore_db))
-    app.add_handler(CommandHandler("backup", backup_cmd))
-    app.add_handler(CommandHandler("utenti", utenti_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
-    app.add_handler(CommandHandler("broadcast_stop", broadcast_stop_cmd))
-    app.add_handler(MessageHandler(~filters.COMMAND,block_all))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(MessageHandler(~filters.COMMAND, flood_guard))
 
-    # Schedulazioni
+    # Jobs
     hhmm=parse_hhmm(BACKUP_TIME)
     now=datetime.now(timezone.utc)
     first=datetime.combine(now.date(),hhmm,tzinfo=timezone.utc)
     if first<=now:first+=timedelta(days=1)
-    app.job_queue.run_repeating(backup_job,86400,first=first)   # ogni 24h
-    app.job_queue.run_repeating(keep_alive_job,600,first=60)    # ogni 10 min
+    app.job_queue.run_repeating(backup_job,86400,first=first)
+    app.job_queue.run_repeating(reset_flood,10)  # reset contatori flood
 
     log.info(f"🚀 BPFARM BOT avviato — v{VERSION}")
     app.run_polling(drop_pending_updates=True,allowed_updates=Update.ALL_TYPES)
