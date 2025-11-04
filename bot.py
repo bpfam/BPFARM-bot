@@ -252,63 +252,99 @@ async def backup_job(context):
             await context.bot.send_message(chat_id=ADMIN_ID,text=f"✅ Backup completato {out.name}",protect_content=True)
     except Exception as e: log.exception(e)
 
-# --------- /restore_db (merge sicuro) ----------
+# --------- /restore_db (MERGE con UPSERT, non perde utenti) ----------
 async def restore_db(update, context):
-    if not is_admin(update.effective_user.id): return
-    m = update.effective_message
-    if not m.reply_to_message or not m.reply_to_message.document:
-        await update.message.reply_text("📦 Rispondi a un file .db con /restore_db"); return
-    d = m.reply_to_message.document
-    if not d.file_name.endswith(".db"):
-        await update.message.reply_text("❌ Il file deve terminare con .db"); return
+    if not is_admin(update.effective_user.id):
+        return
 
+    m = update.effective_message
+    if not m or not m.reply_to_message or not m.reply_to_message.document:
+        await update.message.reply_text(
+            "📦 Per unire un backup:\n"
+            "1) Invia un file .db al bot (come documento)\n"
+            "2) Rispondi a quel messaggio con /restore_db"
+        )
+        return
+
+    d = m.reply_to_message.document
+    if not d.file_name.lower().endswith(".db"):
+        await update.message.reply_text("❌ Il file deve terminare con .db")
+        return
+
+    # scarica il db import da Telegram in una temp
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
     tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"
-    f = await d.get_file()
-    await f.download_to_drive(custom_path=str(tmp))
+    tg_file = await d.get_file()
+    await tg_file.download_to_drive(custom_path=str(tmp))
 
     try:
+        # DB principale e DB import
         main = sqlite3.connect(DB_FILE)
+        imp  = sqlite3.connect(tmp)
+
+        # Assicura schema nel principale
         main.execute("""CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
-            last_name TEXT,
-            joined TEXT
+            last_name  TEXT,
+            joined     TEXT
         )""")
-        try: main.execute("ALTER TABLE users ADD COLUMN joined TEXT;")
-        except: pass
         main.commit()
 
-        imp = sqlite3.connect(tmp); imp.row_factory = sqlite3.Row
-        has_users = imp.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';").fetchone()
+        # Verifica tabella nell'import
+        has_users = imp.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone()
         if not has_users:
             imp.close(); main.close(); tmp.unlink(missing_ok=True)
-            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'."); return
+            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'.")
+            return
 
-        cols = {r["name"] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
-        need_joined = ("joined" not in cols)
-        sel = "SELECT user_id, username, first_name, last_name" + (", joined" if not need_joined else "") + " FROM users"
-        rows = imp.execute(sel).fetchall()
+        # Capisci se l'import ha la colonna joined
+        cols_imp = {r[1] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
+        has_joined = ("joined" in cols_imp)
+
+        # Preleva righe dall'import
+        if has_joined:
+            rows = imp.execute("SELECT user_id,username,first_name,last_name,joined FROM users").fetchall()
+        else:
+            rows = [(uid, un, fn, ln, None) for (uid, un, fn, ln) in
+                    imp.execute("SELECT user_id,username,first_name,last_name FROM users").fetchall()]
 
         before = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         now_iso = datetime.now(timezone.utc).isoformat()
-        to_insert = []
-        if need_joined:
-            for r in rows:
-                to_insert.append((r["user_id"], r["username"], r["first_name"], r["last_name"], now_iso))
-        else:
-            for r in rows:
-                to_insert.append((r["user_id"], r["username"], r["first_name"], r["last_name"], r["joined"] or now_iso))
 
-        main.executemany("INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, joined) VALUES (?,?,?,?,?)", to_insert)
+        # UPSERT: inserisce se nuovo; se esiste aggiorna solo i dati anagrafici, NON tocca 'joined'
+        sql = """
+        INSERT INTO users (user_id, username, first_name, last_name, joined)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username   = COALESCE(excluded.username, users.username),
+            first_name = COALESCE(excluded.first_name, users.first_name),
+            last_name  = COALESCE(excluded.last_name,  users.last_name)
+        """
+        payload = []
+        for (uid, un, fn, ln, jn) in rows:
+            payload.append((uid, un, fn, ln, jn or now_iso))
+
+        main.executemany(sql, payload)
         main.commit()
+
         after = main.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         added = after - before
-        imp.close(); main.close(); tmp.unlink(missing_ok=True)
-        await update.message.reply_text(f"✅ Merge completato.\nAggiunti: {added}\nTotale attuale: {after}",protect_content=True)
+        await update.message.reply_text(
+            f"✅ Merge completato.\n➕ Aggiunti: {added}\n👥 Totale ora: {after}"
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Errore merge DB: {e}",protect_content=True)
+        await update.message.reply_text(f"❌ Errore merge DB: {e}")
+    finally:
+        try: imp.close()
+        except: pass
+        try: main.close()
+        except: pass
+        try: tmp.unlink(missing_ok=True)
+        except: pass
 
 # --------- /backup (manuale) ----------
 async def backup_cmd(update, context):
