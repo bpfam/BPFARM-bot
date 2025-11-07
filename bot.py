@@ -1,15 +1,17 @@
 # =====================================================
 # BPFARM BOT – v3.6.3-secure-full (ptb v21+)
 # - Base: tua v3.6.2
-# - /restore_db MERGE (non cancella utenti)
+# - /restore_db MERGE (non cancella utenti) – robusto (.db/.sqlite3)
 # - Backup rotante (7 giorni)
 # - Anti-flood
 # - FIX iPhone: backup salvabile (protect_content=False)
+# - /backup -> invia vero *.db (no application.octet-stream senza nome)
+# - Backup notturno -> doc con filename corretto
 # - Nuovo: /backup_zip (ZIP compatibile iOS)
 # - Backup notturno: invia anche il file in DM all'admin
 # =====================================================
 
-import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, zipfile   # <--- aggiunto zipfile
+import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, zipfile
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date, time as dtime
 from collections import defaultdict
@@ -75,7 +77,6 @@ def init_db():
         last_name TEXT,
         joined TEXT
     )""")
-    # hardening: assicura colonna joined
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()}
         if "joined" not in cols:
@@ -245,7 +246,7 @@ USER_MSG_COUNT = defaultdict(int)
 async def flood_guard(update, context):
     uid = update.effective_user.id
     USER_MSG_COUNT[uid] += 1
-    if USER_MSG_COUNT[uid] > 10:  # >10 msg in 10s
+    if USER_MSG_COUNT[uid] > 10:
         try:
             await context.bot.send_message(uid, "⛔ Flood rilevato. Attendi 10 secondi.")
         except: pass
@@ -266,7 +267,7 @@ async def status_cmd(update,context):
         f"🔎 Stato bot v{VERSION}\nUTC {now:%H:%M}\nUtenti {count_users()}\nUltimo backup {last.name if last else 'nessuno'}\nProssimo {nxt:%H:%M}",
         protect_content=True)
 
-# --- Backup automatico + rotazione 7 giorni
+# --- Backup automatico + rotazione 7 giorni (INVIA filename corretto)
 async def backup_job(context):
     try:
         Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
@@ -285,37 +286,45 @@ async def backup_job(context):
                 f.unlink(missing_ok=True)
 
         if ADMIN_ID:
-            # Invia anche il file in DM all'admin (compatibile iOS)
-            await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=InputFile(str(out)),
-                filename=out.name,
-                caption=f"✅ Backup completato: {out.name}",
-                disable_content_type_detection=True,
-                protect_content=False
-            )
+            with open(out, "rb") as fh:
+                doc = InputFile(fh, filename=out.name, mime_type="application/octet-stream")
+                await context.bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=doc,
+                    caption=f"✅ Backup completato: {out.name}",
+                    disable_content_type_detection=True,
+                    protect_content=False
+                )
     except Exception as e: 
         log.exception(e)
 
-# --- /restore_db: MERGE (non cancella)
+# --- /restore_db: MERGE robusto (.db/.sqlite3, fix nomi strani)
 async def restore_db(update, context):
     if not admin_only(update): return
     m = update.effective_message
     if not m or not m.reply_to_message or not m.reply_to_message.document:
         await update.message.reply_text("📦 Rispondi a un file .db con /restore_db")
         return
+
     d = m.reply_to_message.document
-    if not d.file_name.lower().endswith(".db"):
-        await update.message.reply_text("❌ Il file deve terminare con .db"); return
+    fname = (d.file_name or "")
 
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"
+    tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"  # forza estensione .db
     tg_file = await d.get_file()
     await tg_file.download_to_drive(custom_path=str(tmp))
 
     try:
         main = sqlite3.connect(DB_FILE)
         imp  = sqlite3.connect(tmp)
+
+        has_users = imp.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone()
+        if not has_users:
+            imp.close(); main.close(); tmp.unlink(missing_ok=True)
+            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'."); return
+
         main.execute("""CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
             username TEXT,
@@ -325,17 +334,8 @@ async def restore_db(update, context):
         )""")
         main.commit()
 
-        has_users = imp.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
-        ).fetchone()
-        if not has_users:
-            imp.close(); main.close(); tmp.unlink(missing_ok=True)
-            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'."); return
-
         cols_imp = {r[1] for r in imp.execute("PRAGMA table_info('users')").fetchall()}
-        has_joined = ("joined" in cols_imp)
-
-        if has_joined:
+        if "joined" in cols_imp:
             rows = imp.execute("SELECT user_id,username,first_name,last_name,joined FROM users").fetchall()
         else:
             rows = [(uid, un, fn, ln, None) for (uid, un, fn, ln) in
@@ -368,19 +368,20 @@ async def restore_db(update, context):
         try: tmp.unlink(missing_ok=True)
         except: pass
 
-# --- /backup manuale  (iPhone-friendly)
+# --- /backup manuale (nome .db corretto, iPhone-friendly)
 async def backup_cmd(update, context):
     if not admin_only(update): return
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
     out = Path(BACKUP_DIR) / f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
     shutil.copy2(DB_FILE, out)
-    await update.message.reply_document(
-        document=InputFile(str(out)),
-        filename=out.name,
-        caption=f"✅ Backup generato: {out.name}",
-        disable_content_type_detection=True,
-        protect_content=False   # <--- cambiato a False
-    )
+    with open(out, "rb") as fh:
+        doc = InputFile(fh, filename=out.name, mime_type="application/octet-stream")
+        await update.message.reply_document(
+            document=doc,
+            caption=f"✅ Backup generato: {out.name}",
+            disable_content_type_detection=True,
+            protect_content=False
+        )
 
 # --- /backup_zip (super compatibile iOS)
 async def backup_zip_cmd(update, context):
@@ -392,13 +393,14 @@ async def backup_zip_cmd(update, context):
     shutil.copy2(DB_FILE, db_path)
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
         z.write(db_path, arcname=db_path.name)
-    await update.message.reply_document(
-        document=InputFile(str(zip_path)),
-        filename=zip_path.name,
-        caption=f"✅ Backup ZIP: {zip_path.name}",
-        disable_content_type_detection=True,
-        protect_content=False
-    )
+    with open(zip_path, "rb") as fh:
+        doc = InputFile(fh, filename=zip_path.name, mime_type="application/zip")
+        await update.message.reply_document(
+            document=doc,
+            caption=f"✅ Backup ZIP: {zip_path.name}",
+            disable_content_type_detection=True,
+            protect_content=False
+        )
     try: db_path.unlink(missing_ok=True)
     except: pass
 
@@ -414,7 +416,7 @@ async def utenti_cmd(update, context):
         for u in users:
             w.writerow([u["user_id"], u["username"] or "", u["first_name"] or "", u["last_name"] or "", u["joined"] or ""])
     await update.message.reply_text(f"👥 Utenti totali: {n}", protect_content=True)
-    await update.message.reply_document(document=InputFile(str(csv_path)), filename=csv_path.name, protect_content=True)
+    await update.message.reply_document(document=InputFile(str(csv_path), filename=csv_path.name), filename=csv_path.name, protect_content=True)
 
 # --- /help (admin)
 async def help_cmd(update, context):
@@ -500,7 +502,7 @@ async def broadcast_stop_cmd(update, context):
     context.application.bot_data["broadcast_stop"] = True
     await update.message.reply_text("⏹️ Broadcast: verrà interrotto al prossimo step.")
 
-# --- Block in gruppi (come prima)
+# --- Block in gruppi
 async def block_all(update,context):
     if update.effective_chat.type in ("group","supergroup") and not is_admin(update.effective_user.id):
         try: await context.bot.delete_message(update.effective_chat.id,update.effective_message.id)
@@ -529,13 +531,13 @@ def main():
     # Pubblici
     app.add_handler(CommandHandler("start",start))
     app.add_handler(CallbackQueryHandler(cb_router))
-    app.add_handler(MessageHandler(~filters.COMMAND, flood_guard))  # anti-flood
+    app.add_handler(MessageHandler(~filters.COMMAND, flood_guard))
 
     # Admin
     app.add_handler(CommandHandler("status",status_cmd))
     app.add_handler(CommandHandler("restore_db",restore_db))
     app.add_handler(CommandHandler("backup", backup_cmd))
-    app.add_handler(CommandHandler("backup_zip", backup_zip_cmd))   # <--- nuovo comando
+    app.add_handler(CommandHandler("backup_zip", backup_zip_cmd))
     app.add_handler(CommandHandler("utenti", utenti_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
