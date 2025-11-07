@@ -1,9 +1,10 @@
 # =====================================================
 # BPFARM BOT – v3.6.3-secure-full (ptb v21+)
-# - /restore_db MERGE robusto (.db/.sqlite3 + nomi strani)
-# - /backup: invia .db + .zip (iOS friendly) con error handling
-# - Backup notturno: filename corretto + errori visibili, rotazione 7gg
-# - Anti-flood, pannelli, broadcast: invariati
+# - /backup: invia .db + .zip (iOS friendly), senza mime_type
+# - /backup_zip: solo ZIP
+# - /restore_db: MERGE robusto (forza .db)
+# - Backup notturno: filename corretto + error reporting, rotazione 7gg
+# - Tutto il resto (bottoni, pannelli, broadcast…) INVARIATO
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, zipfile
@@ -241,7 +242,7 @@ USER_MSG_COUNT = defaultdict(int)
 async def flood_guard(update, context):
     uid = update.effective_user.id
     USER_MSG_COUNT[uid] += 1
-    if USER_MSG_COUNT[uid] > 10:
+    if USER_MSG_COUNT[uid] > 10:  # >10 msg in 10s
         try:
             await context.bot.send_message(uid, "⛔ Flood rilevato. Attendi 10 secondi.")
         except: pass
@@ -262,7 +263,7 @@ async def status_cmd(update,context):
         f"🔎 Stato bot v{VERSION}\nUTC {now:%H:%M}\nUtenti {count_users()}\nUltimo backup {last.name if last else 'nessuno'}\nProssimo {nxt:%H:%M}",
         protect_content=True)
 
-# --- /backup: invia .db + zip con gestione errori esplicita
+# --- /backup: invia .db + zip (senza mime_type)
 async def backup_cmd(update, context):
     if not admin_only(update): 
         return
@@ -273,40 +274,37 @@ async def backup_cmd(update, context):
         zip_out = Path(BACKUP_DIR)/f"backup_{stamp}.zip"
 
         shutil.copy2(DB_FILE, db_out)
-
         with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_DEFLATED) as z:
             z.write(db_out, arcname=db_out.name)
 
-        # invia .db
+        # .db
         try:
-            with open(db_out, "rb") as fh:
-                doc = InputFile(fh, filename=db_out.name, mime_type="application/octet-stream")
-                await update.message.reply_document(
-                    document=doc,
-                    caption=f"✅ Backup .db: {db_out.name}",
-                    disable_content_type_detection=True,
-                    protect_content=False
-                )
+            await update.message.reply_document(
+                document=InputFile(str(db_out)),
+                filename=db_out.name,
+                caption=f"✅ Backup .db: {db_out.name}",
+                disable_content_type_detection=True,
+                protect_content=False
+            )
         except Exception as e:
             await update.message.reply_text(f"⚠️ Impossibile inviare il .db: {e}")
 
-        # invia .zip (fallback iOS)
+        # .zip
         try:
-            with open(zip_out, "rb") as fh:
-                docz = InputFile(fh, filename=zip_out.name, mime_type="application/zip")
-                await update.message.reply_document(
-                    document=docz,
-                    caption=f"✅ Backup ZIP: {zip_out.name}",
-                    disable_content_type_detection=True,
-                    protect_content=False
-                )
+            await update.message.reply_document(
+                document=InputFile(str(zip_out)),
+                filename=zip_out.name,
+                caption=f"✅ Backup ZIP: {zip_out.name}",
+                disable_content_type_detection=True,
+                protect_content=False
+            )
         except Exception as e:
             await update.message.reply_text(f"⚠️ Impossibile inviare lo ZIP: {e}")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Errore backup: {e}")
 
-# --- /backup_zip (comando separato se vuoi solo lo ZIP)
+# --- /backup_zip (solo ZIP)
 async def backup_zip_cmd(update, context):
     if not admin_only(update): return
     try:
@@ -317,18 +315,17 @@ async def backup_zip_cmd(update, context):
         shutil.copy2(DB_FILE, db_out)
         with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_DEFLATED) as z:
             z.write(db_out, arcname=db_out.name)
-        with open(zip_out, "rb") as fh:
-            doc = InputFile(fh, filename=zip_out.name, mime_type="application/zip")
-            await update.message.reply_document(
-                document=doc,
-                caption=f"✅ Backup ZIP: {zip_out.name}",
-                disable_content_type_detection=True,
-                protect_content=False
-            )
+        await update.message.reply_document(
+            document=InputFile(str(zip_out)),
+            filename=zip_out.name,
+            caption=f"✅ Backup ZIP: {zip_out.name}",
+            disable_content_type_detection=True,
+            protect_content=False
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ Errore backup_zip: {e}")
 
-# --- Backup automatico + rotazione 7 giorni (con errori visibili)
+# --- Backup automatico + rotazione 7 giorni (error reporting)
 async def backup_job(context):
     try:
         Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
@@ -348,15 +345,14 @@ async def backup_job(context):
 
         if ADMIN_ID:
             try:
-                with open(out, "rb") as fh:
-                    doc = InputFile(fh, filename=out.name, mime_type="application/octet-stream")
-                    await context.bot.send_document(
-                        chat_id=ADMIN_ID,
-                        document=doc,
-                        caption=f"✅ Backup completato: {out.name}",
-                        disable_content_type_detection=True,
-                        protect_content=False
-                    )
+                await context.bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=InputFile(str(out)),
+                    filename=out.name,
+                    caption=f"✅ Backup completato: {out.name}",
+                    disable_content_type_detection=True,
+                    protect_content=False
+                )
             except Exception as e:
                 await context.bot.send_message(ADMIN_ID, f"⚠️ Errore invio backup notturno: {e}")
 
@@ -367,7 +363,7 @@ async def backup_job(context):
         except:
             pass
 
-# --- /restore_db: MERGE robusto (.db/.sqlite3, fix nomi strani)
+# --- /restore_db: MERGE robusto (forza .db)
 async def restore_db(update, context):
     if not admin_only(update): return
     m = update.effective_message
@@ -377,23 +373,11 @@ async def restore_db(update, context):
 
     d = m.reply_to_message.document
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"  # forza estensione .db
+    tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"  # forza .db
 
     tg_file = await d.get_file()
     await tg_file.download_to_drive(custom_path=str(tmp))
 
-    try:
-        main = sqlite3.connect(DB_FILE)
-        imp  = sqlite3.connect(tmp)
-
-        has_users = imp.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
-        ).fetchone()
-        if not has_users:
-            imp.close(); main.close(); tmp.unlink(missing_ok_ok=True)
-    except TypeError:
-        # per versioni Python senza missing_ok_ok
-        pass
     try:
         main = sqlite3.connect(DB_FILE)
         imp  = sqlite3.connect(tmp)
@@ -460,7 +444,7 @@ async def utenti_cmd(update, context):
         for u in users:
             w.writerow([u["user_id"], u["username"] or "", u["first_name"] or "", u["last_name"] or "", u["joined"] or ""])
     await update.message.reply_text(f"👥 Utenti totali: {n}", protect_content=True)
-    await update.message.reply_document(document=InputFile(str(csv_path), filename=csv_path.name), filename=csv_path.name, protect_content=True)
+    await update.message.reply_document(document=InputFile(str(csv_path)), filename=csv_path.name, protect_content=True)
 
 # --- /help (admin)
 async def help_cmd(update, context):
