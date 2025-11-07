@@ -1,14 +1,9 @@
 # =====================================================
 # BPFARM BOT – v3.6.3-secure-full (ptb v21+)
-# - Base: tua v3.6.2
-# - /restore_db MERGE (non cancella utenti) – robusto (.db/.sqlite3)
-# - Backup rotante (7 giorni)
-# - Anti-flood
-# - FIX iPhone: backup salvabile (protect_content=False)
-# - /backup -> invia vero *.db (no application.octet-stream senza nome)
-# - Backup notturno -> doc con filename corretto
-# - Nuovo: /backup_zip (ZIP compatibile iOS)
-# - Backup notturno: invia anche il file in DM all'admin
+# - /restore_db MERGE robusto (.db/.sqlite3 + nomi strani)
+# - /backup: invia .db + .zip (iOS friendly) con error handling
+# - Backup notturno: filename corretto + errori visibili, rotazione 7gg
+# - Anti-flood, pannelli, broadcast: invariati
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, zipfile
@@ -267,36 +262,110 @@ async def status_cmd(update,context):
         f"🔎 Stato bot v{VERSION}\nUTC {now:%H:%M}\nUtenti {count_users()}\nUltimo backup {last.name if last else 'nessuno'}\nProssimo {nxt:%H:%M}",
         protect_content=True)
 
-# --- Backup automatico + rotazione 7 giorni (INVIA filename corretto)
-async def backup_job(context):
+# --- /backup: invia .db + zip con gestione errori esplicita
+async def backup_cmd(update, context):
+    if not admin_only(update): 
+        return
     try:
-        Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
-        out=Path(BACKUP_DIR)/f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
-        shutil.copy2(DB_FILE,out)
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        db_out  = Path(BACKUP_DIR)/f"backup_{stamp}.db"
+        zip_out = Path(BACKUP_DIR)/f"backup_{stamp}.zip"
 
-        # Rotazione: elimina backup_*.db più vecchi di 7 giorni
-        now = datetime.now(timezone.utc)
-        for f in Path(BACKUP_DIR).glob("backup_*.db"):
-            try:
-                parts = f.stem.split("_")
-                ts = datetime.strptime(parts[1]+"_"+parts[2], "%Y%m%d_%H%M%S")
-            except Exception:
-                continue
-            if (now - ts).days > 7:
-                f.unlink(missing_ok=True)
+        shutil.copy2(DB_FILE, db_out)
 
-        if ADMIN_ID:
-            with open(out, "rb") as fh:
-                doc = InputFile(fh, filename=out.name, mime_type="application/octet-stream")
-                await context.bot.send_document(
-                    chat_id=ADMIN_ID,
+        with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+            z.write(db_out, arcname=db_out.name)
+
+        # invia .db
+        try:
+            with open(db_out, "rb") as fh:
+                doc = InputFile(fh, filename=db_out.name, mime_type="application/octet-stream")
+                await update.message.reply_document(
                     document=doc,
-                    caption=f"✅ Backup completato: {out.name}",
+                    caption=f"✅ Backup .db: {db_out.name}",
                     disable_content_type_detection=True,
                     protect_content=False
                 )
-    except Exception as e: 
-        log.exception(e)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Impossibile inviare il .db: {e}")
+
+        # invia .zip (fallback iOS)
+        try:
+            with open(zip_out, "rb") as fh:
+                docz = InputFile(fh, filename=zip_out.name, mime_type="application/zip")
+                await update.message.reply_document(
+                    document=docz,
+                    caption=f"✅ Backup ZIP: {zip_out.name}",
+                    disable_content_type_detection=True,
+                    protect_content=False
+                )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Impossibile inviare lo ZIP: {e}")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore backup: {e}")
+
+# --- /backup_zip (comando separato se vuoi solo lo ZIP)
+async def backup_zip_cmd(update, context):
+    if not admin_only(update): return
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        db_out  = Path(BACKUP_DIR)/f"backup_{stamp}.db"
+        zip_out = Path(BACKUP_DIR)/f"backup_{stamp}.zip"
+        shutil.copy2(DB_FILE, db_out)
+        with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+            z.write(db_out, arcname=db_out.name)
+        with open(zip_out, "rb") as fh:
+            doc = InputFile(fh, filename=zip_out.name, mime_type="application/zip")
+            await update.message.reply_document(
+                document=doc,
+                caption=f"✅ Backup ZIP: {zip_out.name}",
+                disable_content_type_detection=True,
+                protect_content=False
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore backup_zip: {e}")
+
+# --- Backup automatico + rotazione 7 giorni (con errori visibili)
+async def backup_job(context):
+    try:
+        Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        out=Path(BACKUP_DIR)/f"backup_{stamp}.db"
+        shutil.copy2(DB_FILE,out)
+
+        # Rotazione 7gg
+        now = datetime.now(timezone.utc)
+        for f in Path(BACKUP_DIR).glob("backup_*.db"):
+            try:
+                ts = datetime.strptime("_".join(f.stem.split("_")[1:]), "%Y%m%d_%H%M%S")
+                if (now - ts).days > 7:
+                    f.unlink(missing_ok=True)
+            except:
+                pass
+
+        if ADMIN_ID:
+            try:
+                with open(out, "rb") as fh:
+                    doc = InputFile(fh, filename=out.name, mime_type="application/octet-stream")
+                    await context.bot.send_document(
+                        chat_id=ADMIN_ID,
+                        document=doc,
+                        caption=f"✅ Backup completato: {out.name}",
+                        disable_content_type_detection=True,
+                        protect_content=False
+                    )
+            except Exception as e:
+                await context.bot.send_message(ADMIN_ID, f"⚠️ Errore invio backup notturno: {e}")
+
+    except Exception as e:
+        try:
+            if ADMIN_ID:
+                await context.bot.send_message(ADMIN_ID, f"❌ Errore backup notturno: {e}")
+        except:
+            pass
 
 # --- /restore_db: MERGE robusto (.db/.sqlite3, fix nomi strani)
 async def restore_db(update, context):
@@ -307,13 +376,24 @@ async def restore_db(update, context):
         return
 
     d = m.reply_to_message.document
-    fname = (d.file_name or "")
-
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
     tmp = Path(BACKUP_DIR) / f"import_{d.file_unique_id}.db"  # forza estensione .db
+
     tg_file = await d.get_file()
     await tg_file.download_to_drive(custom_path=str(tmp))
 
+    try:
+        main = sqlite3.connect(DB_FILE)
+        imp  = sqlite3.connect(tmp)
+
+        has_users = imp.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone()
+        if not has_users:
+            imp.close(); main.close(); tmp.unlink(missing_ok_ok=True)
+    except TypeError:
+        # per versioni Python senza missing_ok_ok
+        pass
     try:
         main = sqlite3.connect(DB_FILE)
         imp  = sqlite3.connect(tmp)
@@ -368,42 +448,6 @@ async def restore_db(update, context):
         try: tmp.unlink(missing_ok=True)
         except: pass
 
-# --- /backup manuale (nome .db corretto, iPhone-friendly)
-async def backup_cmd(update, context):
-    if not admin_only(update): return
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    out = Path(BACKUP_DIR) / f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.db"
-    shutil.copy2(DB_FILE, out)
-    with open(out, "rb") as fh:
-        doc = InputFile(fh, filename=out.name, mime_type="application/octet-stream")
-        await update.message.reply_document(
-            document=doc,
-            caption=f"✅ Backup generato: {out.name}",
-            disable_content_type_detection=True,
-            protect_content=False
-        )
-
-# --- /backup_zip (super compatibile iOS)
-async def backup_zip_cmd(update, context):
-    if not admin_only(update): return
-    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    stem = f"backup_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}"
-    db_path  = Path(BACKUP_DIR)/f"{stem}.db"
-    zip_path = Path(BACKUP_DIR)/f"{stem}.zip"
-    shutil.copy2(DB_FILE, db_path)
-    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-        z.write(db_path, arcname=db_path.name)
-    with open(zip_path, "rb") as fh:
-        doc = InputFile(fh, filename=zip_path.name, mime_type="application/zip")
-        await update.message.reply_document(
-            document=doc,
-            caption=f"✅ Backup ZIP: {zip_path.name}",
-            disable_content_type_detection=True,
-            protect_content=False
-        )
-    try: db_path.unlink(missing_ok=True)
-    except: pass
-
 # --- /utenti (totale + CSV)
 async def utenti_cmd(update, context):
     if not admin_only(update): return
@@ -424,8 +468,8 @@ async def help_cmd(update, context):
     msg = (
         f"<b>🛡 Pannello Admin — v{VERSION}</b>\n\n"
         "/status — stato bot / utenti / backup\n"
-        "/backup — backup immediato (.db)\n"
-        "/backup_zip — backup in ZIP (iOS friendly)\n"
+        "/backup — backup immediato (.db + .zip)\n"
+        "/backup_zip — solo ZIP (iOS friendly)\n"
         "/restore_db — rispondi a un .db per importare/merge\n"
         "/utenti — totale e CSV degli utenti\n"
         "/broadcast <testo> — invia a tutti\n"
