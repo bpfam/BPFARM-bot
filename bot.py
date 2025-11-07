@@ -1,10 +1,8 @@
 # =====================================================
-# BPFARM BOT – v3.6.3-secure-full (ptb v21+)
-# - /backup: invia .db + .zip (iOS friendly), senza mime_type
-# - /backup_zip: solo ZIP
-# - /restore_db: MERGE robusto (forza .db)
-# - Backup notturno: filename corretto + error reporting, rotazione 7gg
-# - Tutto il resto (bottoni, pannelli, broadcast…) INVARIATO
+# BPFARM BOT – v3.6.4-secure-full (ptb v21+)
+# - NEW: /diag (diagnostica DB/storage)
+# - backup/restore con check DB SQLite valido
+# - Tutto il resto INVARIATO (tasti, menu, broadcast, ecc.)
 # =====================================================
 
 import os, csv, shutil, logging, sqlite3, asyncio as aio, aiohttp, zipfile
@@ -18,7 +16,7 @@ from telegram.ext import (
 )
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError
 
-VERSION = "3.6.3-secure-full"
+VERSION = "3.6.4-secure-full"
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -122,6 +120,27 @@ def last_backup_file():
     if not p.exists(): return None
     f=sorted(p.glob("*.db"),reverse=True)
     return f[0] if f else None
+
+# --- Check SQLite valido (header + query semplice)
+def is_sqlite_db(path: str):
+    p = Path(path)
+    if not p.exists():
+        return False, "Il file non esiste"
+    try:
+        with open(p, "rb") as f:
+            header = f.read(16)
+        if header != b"SQLite format 3\x00":
+            return False, "Header SQLite mancante"
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("SELECT 1")
+            conn.close()
+        except Exception as e:
+            conn.close()
+            return False, f"Query fallita: {e}"
+        return True, "OK"
+    except Exception as e:
+        return False, f"Errore lettura: {e}"
 
 # ---------------- TEXT SENDER ----------------
 async def _send_one(context, chat_id, text, kb, mode):
@@ -263,9 +282,37 @@ async def status_cmd(update,context):
         f"🔎 Stato bot v{VERSION}\nUTC {now:%H:%M}\nUtenti {count_users()}\nUltimo backup {last.name if last else 'nessuno'}\nProssimo {nxt:%H:%M}",
         protect_content=True)
 
-# --- /backup: invia .db + zip (senza mime_type)
+# --- /diag: diagnostica DB/storage
+async def diag_cmd(update, context):
+    if not admin_only(update): return
+    ok, why = is_sqlite_db(DB_FILE)
+    size = Path(DB_FILE).stat().st_size if Path(DB_FILE).exists() else 0
+    # conta righe se tabella esiste
+    rows = 0
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        has = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'").fetchone()[0]
+        rows = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] if has else 0
+        conn.close()
+    except Exception:
+        pass
+    txt = (
+        f"🔎 DIAG\n"
+        f"DB_FILE: {DB_FILE}\n"
+        f"BACKUP_DIR: {BACKUP_DIR}\n"
+        f"Esiste: {'sì' if Path(DB_FILE).exists() else 'no'}\n"
+        f"Valido: {'sì' if ok else 'no'} ({why})\n"
+        f"Dimensione: {size} byte\n"
+        f"Righe users: {rows}\n"
+    )
+    await update.message.reply_text(txt, protect_content=True)
+
+# --- /backup: invia .db + zip (con check DB valido)
 async def backup_cmd(update, context):
-    if not admin_only(update): 
+    if not admin_only(update): return
+    ok, why = is_sqlite_db(DB_FILE)
+    if not ok:
+        await update.message.reply_text(f"⚠️ DB non valido: {why}\nControlla Disk/variabili. Backup annullato.")
         return
     try:
         Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
@@ -307,6 +354,10 @@ async def backup_cmd(update, context):
 # --- /backup_zip (solo ZIP)
 async def backup_zip_cmd(update, context):
     if not admin_only(update): return
+    ok, why = is_sqlite_db(DB_FILE)
+    if not ok:
+        await update.message.reply_text(f"⚠️ DB non valido: {why}\nControlla Disk/variabili. Backup annullato.")
+        return
     try:
         Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -363,7 +414,7 @@ async def backup_job(context):
         except:
             pass
 
-# --- /restore_db: MERGE robusto (forza .db)
+# --- /restore_db: MERGE robusto (verifica file valido)
 async def restore_db(update, context):
     if not admin_only(update): return
     m = update.effective_message
@@ -378,16 +429,16 @@ async def restore_db(update, context):
     tg_file = await d.get_file()
     await tg_file.download_to_drive(custom_path=str(tmp))
 
+    # check che il file ricevuto sia veramente un DB SQLite
+    ok_imp, why_imp = is_sqlite_db(str(tmp))
+    if not ok_imp:
+        await update.message.reply_text(f"❌ Il file caricato non è un DB SQLite valido: {why_imp}")
+        tmp.unlink(missing_ok=True)
+        return
+
     try:
         main = sqlite3.connect(DB_FILE)
         imp  = sqlite3.connect(tmp)
-
-        has_users = imp.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
-        ).fetchone()
-        if not has_users:
-            imp.close(); main.close(); tmp.unlink(missing_ok=True)
-            await update.message.reply_text("❌ Il DB importato non contiene la tabella 'users'."); return
 
         main.execute("""CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
@@ -452,6 +503,7 @@ async def help_cmd(update, context):
     msg = (
         f"<b>🛡 Pannello Admin — v{VERSION}</b>\n\n"
         "/status — stato bot / utenti / backup\n"
+        "/diag — diagnostica DB/storage\n"
         "/backup — backup immediato (.db + .zip)\n"
         "/backup_zip — solo ZIP (iOS friendly)\n"
         "/restore_db — rispondi a un .db per importare/merge\n"
@@ -563,6 +615,7 @@ def main():
 
     # Admin
     app.add_handler(CommandHandler("status",status_cmd))
+    app.add_handler(CommandHandler("diag",diag_cmd))
     app.add_handler(CommandHandler("restore_db",restore_db))
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("backup_zip", backup_zip_cmd))
