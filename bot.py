@@ -1,7 +1,7 @@
 # =====================================================
 # BPFARM BOT – v3.6.4-secure-full (ptb v21+)
 # - NEW: /diag (diagnostica DB/storage)
-# - backup/restore con check DB SQLite valido
+# - backup/restore con verifica DB SQLite valido
 # - Tutto il resto INVARIATO (tasti, menu, broadcast, ecc.)
 # =====================================================
 
@@ -40,6 +40,7 @@ def _txt(key, default=""):
 
 BOT_TOKEN   = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID    = int(os.environ.get("ADMIN_ID", "0") or "0") or None
+# imposta queste due env su Render, es. /var/data/...
 DB_FILE     = os.environ.get("DB_FILE", "./data/users.db")
 BACKUP_DIR  = os.environ.get("BACKUP_DIR", "./backup")
 BACKUP_TIME = os.environ.get("BACKUP_TIME", "03:00")
@@ -287,7 +288,6 @@ async def diag_cmd(update, context):
     if not admin_only(update): return
     ok, why = is_sqlite_db(DB_FILE)
     size = Path(DB_FILE).stat().st_size if Path(DB_FILE).exists() else 0
-    # conta righe se tabella esiste
     rows = 0
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -324,7 +324,6 @@ async def backup_cmd(update, context):
         with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_DEFLATED) as z:
             z.write(db_out, arcname=db_out.name)
 
-        # .db
         try:
             await update.message.reply_document(
                 document=InputFile(str(db_out)),
@@ -336,7 +335,6 @@ async def backup_cmd(update, context):
         except Exception as e:
             await update.message.reply_text(f"⚠️ Impossibile inviare il .db: {e}")
 
-        # .zip
         try:
             await update.message.reply_document(
                 document=InputFile(str(zip_out)),
@@ -376,7 +374,7 @@ async def backup_zip_cmd(update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Errore backup_zip: {e}")
 
-# --- Backup automatico + rotazione 7 giorni (error reporting)
+# --- Backup automatico + rotazione 7 giorni
 async def backup_job(context):
     try:
         Path(BACKUP_DIR).mkdir(parents=True,exist_ok=True)
@@ -384,7 +382,6 @@ async def backup_job(context):
         out=Path(BACKUP_DIR)/f"backup_{stamp}.db"
         shutil.copy2(DB_FILE,out)
 
-        # Rotazione 7gg
         now = datetime.now(timezone.utc)
         for f in Path(BACKUP_DIR).glob("backup_*.db"):
             try:
@@ -429,7 +426,6 @@ async def restore_db(update, context):
     tg_file = await d.get_file()
     await tg_file.download_to_drive(custom_path=str(tmp))
 
-    # check che il file ricevuto sia veramente un DB SQLite
     ok_imp, why_imp = is_sqlite_db(str(tmp))
     if not ok_imp:
         await update.message.reply_text(f"❌ Il file caricato non è un DB SQLite valido: {why_imp}")
